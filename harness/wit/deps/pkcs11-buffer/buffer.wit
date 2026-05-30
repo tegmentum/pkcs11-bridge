@@ -1,0 +1,21 @@
+package pkcs11:buffer;
+
+interface buffer {
+  /// Canonical heap-allocated byte string alias shared across packages.
+  type bytes = list<u8>;
+
+  /// Streaming chunk used by multipart operations.
+  record chunk {
+    data: bytes,
+    final: bool,
+  }
+
+  /// Host-managed zero-copy view over token data.
+  resource data-slice {
+    /// Number of bytes represented by this slice.
+    len: func() -> u32;
+
+    /// Read a subsection of the slice into guest memory.
+    read: func(offset: u32, max: u32) -> bytes;
+  }
+}

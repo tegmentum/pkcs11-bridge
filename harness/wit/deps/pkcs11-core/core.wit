@@ -1,0 +1,287 @@
+package pkcs11:core;
+
+interface core {
+  use pkcs11:buffer/buffer.{bytes};
+
+  /// PKCS#11 version value commonly used in slot/token metadata.
+  record version {
+    major: u8,
+    minor: u8,
+  }
+
+  /// Metadata returned by `C_GetInfo` describing the loaded module.
+  record module-info {
+    cryptoki-version: version,
+    manufacturer-id: string,
+    module-flags: u64,
+    library-description: string,
+    library-version: version,
+  }
+
+  /// All PKCS#11 calls return an error code. `ok` represents CKR_OK.
+  /// This variant covers all standard PKCS#11 v2.40 error codes.
+  variant error-code {
+    ok,                                    // CKR_OK = 0x00000000
+    cancel,                                // CKR_CANCEL
+    host-memory,                           // CKR_HOST_MEMORY
+    slot-id-invalid,                       // CKR_SLOT_ID_INVALID
+    general-error,                         // CKR_GENERAL_ERROR
+    function-failed,                       // CKR_FUNCTION_FAILED
+    arguments-bad,                         // CKR_ARGUMENTS_BAD
+    no-event,                              // CKR_NO_EVENT
+    need-to-create-thread,                 // CKR_NEED_TO_CREATE_THREAD
+    cant-lock,                             // CKR_CANT_LOCK
+    attribute-read-only,                   // CKR_ATTRIBUTE_READ_ONLY
+    attribute-sensitive,                   // CKR_ATTRIBUTE_SENSITIVE
+    attribute-type-invalid,                // CKR_ATTRIBUTE_TYPE_INVALID
+    attribute-value-invalid,               // CKR_ATTRIBUTE_VALUE_INVALID
+    action-prohibited,                     // CKR_ACTION_PROHIBITED
+    data-invalid,                          // CKR_DATA_INVALID
+    data-len-range,                        // CKR_DATA_LEN_RANGE
+    device-error,                          // CKR_DEVICE_ERROR
+    device-memory,                         // CKR_DEVICE_MEMORY
+    device-removed,                        // CKR_DEVICE_REMOVED
+    encrypted-data-invalid,                // CKR_ENCRYPTED_DATA_INVALID
+    encrypted-data-len-range,              // CKR_ENCRYPTED_DATA_LEN_RANGE
+    function-canceled,                     // CKR_FUNCTION_CANCELED
+    function-not-parallel,                 // CKR_FUNCTION_NOT_PARALLEL
+    function-not-supported,                // CKR_FUNCTION_NOT_SUPPORTED
+    key-handle-invalid,                    // CKR_KEY_HANDLE_INVALID
+    key-size-range,                        // CKR_KEY_SIZE_RANGE
+    key-type-inconsistent,                 // CKR_KEY_TYPE_INCONSISTENT
+    key-not-needed,                        // CKR_KEY_NOT_NEEDED
+    key-changed,                           // CKR_KEY_CHANGED
+    key-needed,                            // CKR_KEY_NEEDED
+    key-indigestible,                      // CKR_KEY_INDIGESTIBLE
+    key-function-not-permitted,            // CKR_KEY_FUNCTION_NOT_PERMITTED
+    key-not-wrappable,                     // CKR_KEY_NOT_WRAPPABLE
+    key-unextractable,                     // CKR_KEY_UNEXTRACTABLE
+    mechanism-invalid,                     // CKR_MECHANISM_INVALID
+    mechanism-param-invalid,               // CKR_MECHANISM_PARAM_INVALID
+    object-handle-invalid,                 // CKR_OBJECT_HANDLE_INVALID
+    operation-active,                      // CKR_OPERATION_ACTIVE
+    operation-not-initialized,             // CKR_OPERATION_NOT_INITIALIZED
+    pin-incorrect,                         // CKR_PIN_INCORRECT
+    pin-invalid,                           // CKR_PIN_INVALID
+    pin-len-range,                         // CKR_PIN_LEN_RANGE
+    pin-expired,                           // CKR_PIN_EXPIRED
+    pin-locked,                            // CKR_PIN_LOCKED
+    session-closed,                        // CKR_SESSION_CLOSED
+    session-count,                         // CKR_SESSION_COUNT
+    session-handle-invalid,                // CKR_SESSION_HANDLE_INVALID
+    session-parallel-not-supported,        // CKR_SESSION_PARALLEL_NOT_SUPPORTED
+    session-read-only,                     // CKR_SESSION_READ_ONLY
+    session-exists,                        // CKR_SESSION_EXISTS
+    session-read-only-exists,              // CKR_SESSION_READ_ONLY_EXISTS
+    session-read-write-so-exists,          // CKR_SESSION_READ_WRITE_SO_EXISTS
+    signature-invalid,                     // CKR_SIGNATURE_INVALID
+    signature-len-range,                   // CKR_SIGNATURE_LEN_RANGE
+    template-incomplete,                   // CKR_TEMPLATE_INCOMPLETE
+    template-inconsistent,                 // CKR_TEMPLATE_INCONSISTENT
+    token-not-present,                     // CKR_TOKEN_NOT_PRESENT
+    token-not-recognized,                  // CKR_TOKEN_NOT_RECOGNIZED
+    token-write-protected,                 // CKR_TOKEN_WRITE_PROTECTED
+    unwrapping-key-handle-invalid,         // CKR_UNWRAPPING_KEY_HANDLE_INVALID
+    unwrapping-key-size-range,             // CKR_UNWRAPPING_KEY_SIZE_RANGE
+    unwrapping-key-type-inconsistent,      // CKR_UNWRAPPING_KEY_TYPE_INCONSISTENT
+    user-already-logged-in,                // CKR_USER_ALREADY_LOGGED_IN
+    user-not-logged-in,                    // CKR_USER_NOT_LOGGED_IN
+    user-pin-not-initialized,              // CKR_USER_PIN_NOT_INITIALIZED
+    user-type-invalid,                     // CKR_USER_TYPE_INVALID
+    user-another-already-logged-in,        // CKR_USER_ANOTHER_ALREADY_LOGGED_IN
+    user-too-many-types,                   // CKR_USER_TOO_MANY_TYPES
+    wrapped-key-invalid,                   // CKR_WRAPPED_KEY_INVALID
+    wrapped-key-len-range,                 // CKR_WRAPPED_KEY_LEN_RANGE
+    wrapping-key-handle-invalid,           // CKR_WRAPPING_KEY_HANDLE_INVALID
+    wrapping-key-size-range,               // CKR_WRAPPING_KEY_SIZE_RANGE
+    wrapping-key-type-inconsistent,        // CKR_WRAPPING_KEY_TYPE_INCONSISTENT
+    random-seed-not-supported,             // CKR_RANDOM_SEED_NOT_SUPPORTED
+    random-no-rng,                         // CKR_RANDOM_NO_RNG
+    domain-params-invalid,                 // CKR_DOMAIN_PARAMS_INVALID
+    curve-not-supported,                   // CKR_CURVE_NOT_SUPPORTED
+    buffer-too-small,                      // CKR_BUFFER_TOO_SMALL
+    saved-state-invalid,                   // CKR_SAVED_STATE_INVALID
+    information-sensitive,                 // CKR_INFORMATION_SENSITIVE
+    state-unsaveable,                      // CKR_STATE_UNSAVEABLE
+    cryptoki-not-initialized,              // CKR_CRYPTOKI_NOT_INITIALIZED
+    cryptoki-already-initialized,          // CKR_CRYPTOKI_ALREADY_INITIALIZED
+    mutex-bad,                             // CKR_MUTEX_BAD
+    mutex-not-locked,                      // CKR_MUTEX_NOT_LOCKED
+    new-pin-mode,                          // CKR_NEW_PIN_MODE
+    next-otp,                              // CKR_NEXT_OTP
+    exceeded-max-iterations,               // CKR_EXCEEDED_MAX_ITERATIONS
+    fips-self-test-failed,                 // CKR_FIPS_SELF_TEST_FAILED
+    library-load-failed,                   // CKR_LIBRARY_LOAD_FAILED
+    pin-too-weak,                          // CKR_PIN_TOO_WEAK
+    public-key-invalid,                    // CKR_PUBLIC_KEY_INVALID
+    function-rejected,                     // CKR_FUNCTION_REJECTED
+    vendor(u32),                           // CKR_VENDOR_DEFINED (0x80000000+)
+    unknown(u32),                          // Any other error code
+  }
+
+  /// Slot identifier mirrors CK_SLOT_ID.
+  type slot-id = u32;
+
+  /// Session handle mirrors CK_SESSION_HANDLE.
+  type session-handle = u32;
+
+  /// Object handle mirrors CK_OBJECT_HANDLE.
+  type object-handle = u32;
+
+  /// Mechanism identifiers mirror CK_MECHANISM_TYPE.
+  type mechanism-type = u64;
+
+  /// Key classes as defined by CK_OBJECT_CLASS.
+  type object-class = u32;
+
+  /// Key types as defined by CK_KEY_TYPE.
+  type key-type = u32;
+
+  /// Attribute tags map to CK_ATTRIBUTE_TYPE values.
+  type attribute-tag = u32;
+
+  /// PKCS#11 session flags.
+  flags session-flags {
+    rw-session,
+    serial-session,
+  }
+
+  /// Slot capability flags.
+  flags slot-flags {
+    token-present,
+    removable-device,
+    hw-slot,
+  }
+
+  /// Token capability flags.
+  flags token-flags {
+    rng,
+    write-protected,
+    login-required,
+    user-pin-initialized,
+    restore-key-not-needed,
+    clock-on-token,
+    protected-authentication-path,
+    dual-crypto-operations,
+    token-initialized,
+    secondary-authentication,
+    user-pin-count-low,
+    user-pin-final-try,
+    user-pin-locked,
+    user-pin-to-be-changed,
+    so-pin-count-low,
+    so-pin-final-try,
+    so-pin-locked,
+    so-pin-to-be-changed,
+    error-state,
+  }
+
+  /// Mechanism capability flags.
+  flags mechanism-flags {
+    hw,
+    encrypt,
+    decrypt,
+    digest,
+    sign,
+    sign-recover,
+    verify,
+    verify-recover,
+    generate,
+    generate-key-pair,
+    wrap,
+    unwrap,
+    derive,
+    extension,
+  }
+
+  /// Session state values mirror CK_STATE.
+  enum session-state {
+    ro-public-session,
+    ro-user-functions,
+    rw-public-session,
+    rw-user-functions,
+    rw-so-functions,
+  }
+
+  /// User types used for login/logout flows.
+  enum user-type {
+    so,
+    user,
+    context-specific,
+  }
+
+  /// Vendor-specific user types can be represented via numeric identifier.
+  type vendor-user-type = u32;
+
+  /// Slot metadata returned by slot discovery APIs.
+  record slot-info {
+    slot-description: string,
+    manufacturer-id: string,
+    slot-flags: slot-flags,
+    hardware-version: version,
+    firmware-version: version,
+  }
+
+  /// Token metadata returned when opening a slot.
+  record token-info {
+    label: string,
+    manufacturer-id: string,
+    model: string,
+    serial-number: string,
+    token-flags: token-flags,
+    max-session-count: u64,
+    session-count: u64,
+    max-rw-session-count: u64,
+    rw-session-count: u64,
+    max-pin-len: u64,
+    min-pin-len: u64,
+    total-public-memory: option<u64>,
+    free-public-memory: option<u64>,
+    total-private-memory: option<u64>,
+    free-private-memory: option<u64>,
+    hardware-version: version,
+    firmware-version: version,
+    utc-time: option<string>,
+  }
+
+  /// Mechanism metadata describing allowable operations and key lengths.
+  record mechanism-info {
+    min-key-size: u64,
+    max-key-size: u64,
+    mechanism-flags: mechanism-flags,
+  }
+
+  /// Provides a typed view over boolean PKCS#11 attributes.
+  variant attribute-value {
+    boolean(bool),
+    uint32(u32),
+    uint64(u64),
+    byte-string(bytes),
+    date-string(string),
+    mechanism-type(mechanism-type),
+    key-kind(key-type),
+    object-kind(object-class),
+    vendor-bytes(bytes),
+  }
+
+  /// Attribute template entry used for create/copy/find/search.
+  record attribute {
+    tag: attribute-tag,
+    value: attribute-value,
+  }
+
+  /// Collection of attributes represented as a simple list.
+  type attribute-template = list<attribute>;
+
+  /// Mechanism request combines type with optional parameters serialized elsewhere.
+  record mechanism {
+    kind: mechanism-type,
+    parameter: option<bytes>,
+  }
+
+  /// Utility result type for operations with optional output data.
+  record output-buffer {
+    data: bytes,
+    truncated: bool,
+  }
+}

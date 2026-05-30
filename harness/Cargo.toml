@@ -1,0 +1,13 @@
+[workspace]
+
+[package]
+name    = "pkcs11-bridge-harness"
+version = "0.1.0"
+edition = "2021"
+description = "Native wasmtime harness: drives tegmentum:key-backend through pkcs11-bridge + softhsm-wasm and verifies the signature with openssl-rs"
+
+[dependencies]
+anyhow      = "1"
+wasmtime    = { version = "38.0.3", features = ["component-model"] }
+wasmtime-wasi = "38.0.3"
+openssl     = "0.10"

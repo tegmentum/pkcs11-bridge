@@ -1,0 +1,12 @@
+package compose:pkcs11-bridge-harness@0.1.0;
+
+// Native wasmtime harness view of the composed pkcs11-bridge +
+// pkcs11-provider + softhsm2 stack. The composed component exports
+// our `tegmentum:key-backend` (Layer 3 of the openssl-provider-wit
+// stack); it imports `pkcs11:util/util` because the underlying
+// pkcs11-wit types reference the pin-provider resource (we stub it
+// here -- all login uses inline PINs from the URI).
+world harness {
+    import pkcs11:util/util;
+    export tegmentum:key-backend/key-backend@0.1.0;
+}
