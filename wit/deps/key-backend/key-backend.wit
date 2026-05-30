@@ -1,0 +1,269 @@
+// Narrow Layer-3 contract a typical cryptographic backend implements.
+//
+// The full OpenSSL 3 provider ABI (modeled in openssl-provider-wit as
+// Layer 1) is ~120 functions across keymgmt / signature / asym-cipher
+// / key-exchange / encoder / etc. Most backends don't care about that
+// surface -- they want to say "here's a private key reference; I can
+// sign, verify, decrypt, derive."
+//
+// simple-provider-adapter (a Rust component) exports the full Layer-1
+// ABI and imports this interface. A pkcs11-bridge, a webauthn-bridge,
+// or a hardware-token-bridge each implements this. The adapter does
+// the OSSL_PARAM marshalling, mechanism enum translation, and
+// resource-lifecycle bookkeeping so backends can stay narrow.
+
+package tegmentum:key-backend@0.1.0;
+
+interface key-backend {
+  // -------------------------------------------------------------------
+  // Algorithm classes
+  // -------------------------------------------------------------------
+  //
+  // What kind of key this is, returned by key.algorithm(). The
+  // adapter uses this to advertise the key under the right OpenSSL
+  // algorithm name ("RSA", "EC", "ED25519", etc.) and to know which
+  // signature mechanisms are valid.
+  variant key-algorithm {
+    // RSA. SPKI carries modulus + exponent; sign supports
+    // pkcs1-v1_5 + pss; decrypt supports pkcs1-v1_5 + oaep.
+    rsa(rsa-info),
+    // EC over a named curve. SPKI carries the named-curve OID +
+    // uncompressed point; sign supports ecdsa.
+    ec(ec-info),
+    // Ed25519. SPKI carries the raw 32-byte public key; sign
+    // supports pureeddsa (no separate hash).
+    ed25519,
+    // Ed448. SPKI carries the 57-byte public key; sign supports
+    // pureeddsa.
+    ed448,
+    // X25519 / X448 — for ECDH key agreement; sign is not
+    // supported; derive is. Backends that don't do derive should
+    // still answer algorithm() correctly so the adapter can pick
+    // the right rejection error.
+    x25519,
+    x448,
+  }
+
+  record rsa-info {
+    // Modulus size in bits (e.g. 2048, 3072, 4096). Determines max
+    // plaintext / signature size and the mechanism encoding length.
+    modulus-bits: u32,
+  }
+
+  record ec-info {
+    // Named curve. OpenSSL names: "P-256", "P-384", "P-521",
+    // "secp256k1". Lowercase or mixed-case both accepted; adapter
+    // normalizes when constructing OSSL_PARAM "group".
+    curve: string,
+  }
+
+  // -------------------------------------------------------------------
+  // Signature mechanisms
+  // -------------------------------------------------------------------
+  //
+  // What scheme to use for sign / verify. The adapter translates
+  // OpenSSL's OSSL_PARAM "pad-mode" / "digest" / "saltlen" / etc.
+  // into one of these variants before calling the backend.
+
+  variant signature-mechanism {
+    // RSA PKCS#1 v1.5 with the given digest. `tbs` passed to
+    // key.sign is the raw message to be signed; backend handles
+    // DigestInfo wrap if needed (some backends do, some don't --
+    // the adapter sets digest-info-already-wrapped on this variant
+    // when it has pre-wrapped, see digest-info-handling below).
+    rsa-pkcs1(digest-algorithm),
+    // RSA PSS with mgf1 hash + salt length.
+    rsa-pss(rsa-pss-params),
+    // ECDSA with the given digest. tbs is the message (backend
+    // hashes); some backends want a pre-hashed tbs, handled the
+    // same way as rsa-pkcs1's pre-wrap.
+    ecdsa(digest-algorithm),
+    // Pure EdDSA (no hash inside). Backend signs `tbs` directly.
+    eddsa,
+    // RSA "raw" -- no padding, no hash. Almost never useful in TLS
+    // but exposed for completeness.
+    rsa-raw,
+  }
+
+  record rsa-pss-params {
+    digest: digest-algorithm,
+    mgf1-digest: digest-algorithm,
+    // Salt length in bytes. Special sentinel u32::MAX = "auto"
+    // (digest output length); use 0xFFFFFFFE for "max possible
+    // for the key size".
+    salt-len: u32,
+  }
+
+  // Naming uses single-word identifiers (no internal `-N`) for
+  // wit-bindgen 0.44 toolchain compatibility -- some versions trip on
+  // a digit immediately after `-` in an identifier. "sha256" reads
+  // identically to OpenSSL's algorithm names ("SHA2-256" / "SHA-256")
+  // anyway; the adapter normalizes when it writes back the OSSL_PARAM
+  // "digest" string.
+  enum digest-algorithm {
+    sha1,
+    sha224,
+    sha256,
+    sha384,
+    sha512,
+    sha3-s256,
+    sha3-s384,
+    sha3-s512,
+    // For backends that take pre-hashed input directly with no
+    // identity wrap -- the adapter has done the hashing.
+    raw,
+  }
+
+  // Whether `tbs` arrives at the backend already wrapped in a
+  // DigestInfo sequence (RSA PKCS#1 v1.5 with digest != raw). Most
+  // hardware tokens want the wrapped form because the C_Sign call
+  // takes opaque bytes; soft backends usually want the raw hash.
+  // The adapter inspects backend.signature-wrapping-policy() to
+  // decide which form to pass.
+  enum signature-wrapping-policy {
+    // Backend wants `tbs` pre-wrapped (DigestInfo for PKCS#1 v1.5,
+    // raw hash for everything else).
+    wrapped,
+    // Backend wants `tbs` raw (message bytes); backend will hash +
+    // wrap internally. Required for EdDSA -- no pre-hash possible.
+    raw,
+  }
+
+  // -------------------------------------------------------------------
+  // Asymmetric cipher mechanisms (RSA only)
+  // -------------------------------------------------------------------
+  variant cipher-mechanism {
+    rsa-pkcs1,
+    rsa-oaep(rsa-oaep-params),
+    rsa-raw,
+  }
+
+  record rsa-oaep-params {
+    digest: digest-algorithm,
+    mgf1-digest: digest-algorithm,
+    // Optional OAEP label (almost always empty for TLS).
+    label: list<u8>,
+  }
+
+  // -------------------------------------------------------------------
+  // Errors
+  // -------------------------------------------------------------------
+  variant backend-error {
+    // The URI / handle didn't resolve to a key.
+    key-not-found(string),
+    // Wrong algorithm for the operation (e.g. ECDSA on an RSA key).
+    algorithm-mismatch(string),
+    // Mechanism not supported by this backend (e.g. SHA-3 on a
+    // smartcard that only does SHA-2).
+    mechanism-not-supported(string),
+    // Backend authentication failed (e.g. PKCS#11 CKR_PIN_INCORRECT).
+    authentication-failed(string),
+    // I/O failure talking to the underlying hardware / network.
+    transport-error(string),
+    // Catch-all.
+    internal(string),
+  }
+
+  // -------------------------------------------------------------------
+  // Key resource
+  // -------------------------------------------------------------------
+  //
+  // Each `key` represents one private key the backend can act on.
+  // Constructed from a URI:
+  //   - pkcs11:slot-id=0;object=tls-srv;pin-value=1234
+  //   - webauthn:credential-id=...
+  //   - webcrypto:indexed-db-key-name=...
+  // The backend interprets the URI scheme.
+  //
+  // The key holds no extractable secret material on the WIT side --
+  // every operation goes back to the backend via this resource.
+
+  resource key {
+    // Resolve a URI to a key handle. The backend owns the actual
+    // material; we only get back the opaque resource handle.
+    // Errors:
+    //   key-not-found     if the URI doesn't resolve
+    //   authentication-failed if a PIN/token is wrong
+    //   transport-error   if the backend can't reach the token
+    constructor(uri: string);
+
+    // What kind of key this is. Adapter uses this to advertise the
+    // key under the right OpenSSL algorithm and to choose
+    // mechanism variants.
+    algorithm: func() -> key-algorithm;
+
+    // SPKI DER (SubjectPublicKeyInfo) for the public half. This is
+    // what OpenSSL needs to build the certificate / verify chain /
+    // populate `pkeyparam.export`. PKCS#11 backends usually pull
+    // this from the public-key object; software backends construct
+    // it from modulus+exponent or curve point.
+    //
+    // Returns the standard ASN.1 DER encoding -- the same bytes
+    // PEM-decode would yield from a "PUBLIC KEY" block (with the
+    // PEM armor stripped).
+    public-key-info: func() -> result<list<u8>, backend-error>;
+
+    // What pre-processing the backend wants on `tbs` for sign/
+    // verify calls. See the signature-wrapping-policy comment
+    // above. The adapter calls this once per mechanism choice
+    // (cheap; backends can cache).
+    signature-wrapping-policy: func(mech: signature-mechanism)
+      -> signature-wrapping-policy;
+
+    // Sign `tbs` with `mech`. Returns the raw signature in the
+    // OpenSSL-expected format:
+    //   - rsa-pkcs1 / rsa-pss / rsa-raw: modulus-bits/8 bytes
+    //   - ecdsa: DER-encoded ECDSA-Sig-Value SEQUENCE { r, s }
+    //     (NOT the IEEE P1363 raw r||s form)
+    //   - eddsa: 64 bytes (Ed25519) or 114 (Ed448)
+    //
+    // `tbs` is already wrapped or raw per signature-wrapping-policy.
+    //
+    // Errors:
+    //   algorithm-mismatch        if mech doesn't fit key.algorithm()
+    //   mechanism-not-supported   if backend can't do this mech
+    //   authentication-failed     if the token re-prompts and fails
+    sign: func(
+      tbs: list<u8>,
+      mech: signature-mechanism,
+    ) -> result<list<u8>, backend-error>;
+
+    // Verify `signature` over `tbs` with `mech`. Returns true if
+    // valid. Most adapters won't call this -- OpenSSL has its own
+    // verify path via the public key -- but it's exposed so a
+    // backend can do hardware-backed verify if desired (e.g.,
+    // smartcard with a trusted display).
+    verify: func(
+      tbs: list<u8>,
+      signature: list<u8>,
+      mech: signature-mechanism,
+    ) -> result<bool, backend-error>;
+
+    // RSA decrypt. Used for TLS 1.2 RSA key-exchange premaster
+    // secret decryption. EC/EdDSA keys return algorithm-mismatch.
+    //
+    // The returned plaintext is the unpadded message:
+    //   - rsa-pkcs1: PKCS#1 v1.5 padding stripped
+    //   - rsa-oaep: OAEP unwrap done
+    //   - rsa-raw: modulus-bits/8 bytes; no unwrap
+    //
+    // The PKCS#1 v1.5 path SHOULD use the constant-time
+    // implicit-rejection scheme (RFC 8017 section 7.2.2 paragraph
+    // 3) to defeat the Bleichenbacher oracle -- if the backend
+    // can't, the adapter falls back to OpenSSL's own check on the
+    // returned bytes.
+    decrypt: func(
+      ciphertext: list<u8>,
+      mech: cipher-mechanism,
+    ) -> result<list<u8>, backend-error>;
+
+    // ECDH-style key agreement. `peer-public-key` is the peer's
+    // SPKI DER. Returns the raw shared secret (x-coordinate of
+    // ECDH; pre-KDF).
+    //
+    // RSA / EdDSA keys return algorithm-mismatch.
+    derive: func(
+      peer-public-key: list<u8>,
+    ) -> result<list<u8>, backend-error>;
+  }
+}

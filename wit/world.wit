@@ -1,0 +1,27 @@
+package tegmentum:pkcs11-bridge@0.1.0;
+
+use pkcs11:session/session;
+use pkcs11:token/slot-manager;
+use pkcs11:object/object;
+use tegmentum:key-backend/key-backend@0.1.0;
+
+// Layer-3 backend exposing `tegmentum:key-backend` over a real
+// PKCS#11 token via the `pkcs11:host` interface set.
+//
+//   simple-provider-adapter
+//     ↓ tegmentum:key-backend
+//   pkcs11-bridge                  ← THIS COMPONENT
+//     ↓ pkcs11:host (slot-manager + session + object + crypto)
+//   pkcs11-wasm-host               (Rust host adapter, wasmtime)
+//     ↓ libpkcs11.so (libsofthsm2 / Yubico / Luna / ...)
+//
+// One bridge instance = one pkcs11 module session. Each key resource
+// constructor opens a session, optionally logs in, and resolves the
+// URI to a CK_OBJECT_HANDLE.
+world bridge {
+  export key-backend;
+
+  import slot-manager;
+  import session;
+  import object;
+}

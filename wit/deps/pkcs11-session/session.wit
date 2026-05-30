@@ -1,0 +1,122 @@
+package pkcs11:session;
+
+interface session {
+  use pkcs11:buffer/buffer.{bytes};
+  use pkcs11:core/core.{attribute-template, error-code, mechanism, object-handle, output-buffer, session-flags, session-state, slot-id, user-type, vendor-user-type};
+  use pkcs11:crypto/crypto.{decryptor, digester, encryptor, signer, verifier};
+  use pkcs11:object/object.{object, search};
+  use pkcs11:util/util.{credential};
+
+  /// Snapshot of the current session, mirroring `CK_SESSION_INFO`.
+  record session-info {
+    slot: slot-id,
+    state: session-state,
+    session-flags: session-flags,
+    device-error: u64,
+  }
+
+  /// PKCS#11 session resource managing authentication boundaries and stateful operations.
+  resource session {
+    /// Close the underlying CK_SESSION_HANDLE. Safe to call multiple times.
+    close: func() -> result<_, error-code>;
+
+    /// Retrieve the latest session state and device error flags.
+    get-info: func() -> result<session-info, error-code>;
+
+    /// Acquire a serialized operation state blob for migration or resume flows.
+    get-operation-state: func(max-size: u32) -> result<output-buffer, error-code>;
+
+    /// Restore a previously captured operation state.
+    set-operation-state: func(state: bytes, encryption-key: option<object-handle>, auth-key: option<object-handle>) -> result<_, error-code>;
+
+    /// Log into the token using the supplied user class and credentials.
+    login: func(kind: user-type, secret: credential) -> result<_, error-code>;
+
+    /// Log into the token using a vendor-specific user type.
+    login-vendor: func(kind: vendor-user-type, secret: credential) -> result<_, error-code>;
+
+    /// Log out of the token, returning the session to a public state.
+    logout: func() -> result<_, error-code>;
+
+    /// Initialize a normal user's PIN (SO-only operation).
+    init-pin: func(new-pin: credential) -> result<_, error-code>;
+
+    /// Change the PIN for an authenticated user.
+    set-pin: func(old-pin: credential, new-pin: credential) -> result<_, error-code>;
+
+    /// Request the token to cancel the currently running function.
+    cancel-function: func() -> result<_, error-code>;
+
+    /// Create a new object on the token using the supplied template.
+    create-object: func(template: attribute-template) -> result<object, error-code>;
+
+    /// Copy an existing object, applying an optional attribute template override.
+    copy-object: func(source: borrow<object>, template: attribute-template) -> result<object, error-code>;
+
+    /// Begin a search for objects that match the provided template.
+    find-objects-init: func(template: attribute-template) -> result<search, error-code>;
+
+    /// Convert a raw object handle obtained through external means into a managed resource.
+    bind-object: func(handle: object-handle) -> result<object, error-code>;
+
+    /// Perform a one-shot encryption operation.
+    encrypt: func(mechanism: mechanism, key: borrow<object>, plaintext: bytes, out-max: u32) -> result<output-buffer, error-code>;
+
+    /// Perform a one-shot decryption operation.
+    decrypt: func(mechanism: mechanism, key: borrow<object>, ciphertext: bytes, out-max: u32) -> result<output-buffer, error-code>;
+
+    /// Perform a one-shot signing operation returning the signature bytes.
+    sign: func(mechanism: mechanism, key: borrow<object>, message: bytes) -> result<bytes, error-code>;
+
+    /// Perform a one-shot verification operation.
+    verify: func(mechanism: mechanism, key: borrow<object>, message: bytes, signature: bytes) -> result<_, error-code>;
+
+    /// Recover cleartext from a signature using mechanisms that support the operation.
+    sign-recover: func(mechanism: mechanism, key: borrow<object>, data: bytes, out-max: u32) -> result<output-buffer, error-code>;
+
+    /// Recover original data while verifying the provided signature.
+    verify-recover: func(mechanism: mechanism, key: borrow<object>, signature: bytes, out-max: u32) -> result<output-buffer, error-code>;
+
+    /// Perform a one-shot digest operation.
+    digest: func(mechanism: mechanism, data: bytes) -> result<bytes, error-code>;
+
+    /// Initialize a multipart encryption context.
+    encrypt-init: func(mechanism: mechanism, key: borrow<object>) -> result<encryptor, error-code>;
+
+    /// Initialize a multipart decryption context.
+    decrypt-init: func(mechanism: mechanism, key: borrow<object>) -> result<decryptor, error-code>;
+
+    /// Initialize a multipart signing context.
+    sign-init: func(mechanism: mechanism, key: borrow<object>) -> result<signer, error-code>;
+
+    /// Initialize a multipart verification context.
+    verify-init: func(mechanism: mechanism, key: borrow<object>) -> result<verifier, error-code>;
+
+    /// Initialize a multipart digest context.
+    digest-init: func(mechanism: mechanism) -> result<digester, error-code>;
+
+    /// Generate a secret or public object using the provided template.
+    generate-key: func(mechanism: mechanism, template: attribute-template) -> result<object, error-code>;
+
+  /// Generate a public/private key pair and return both handles.
+  generate-key-pair: func(mechanism: mechanism, public-template: attribute-template, private-template: attribute-template) -> result<tuple<object, object>, error-code>;
+
+    /// Derive a new key from an existing base key.
+    derive-key: func(base-key: borrow<object>, mechanism: mechanism, template: attribute-template) -> result<object, error-code>;
+
+    /// Digest the value of a key as part of a multipart digest operation.
+    digest-key: func(key: borrow<object>) -> result<_, error-code>;
+
+    /// Wrap a key into a transport blob using the supplied wrapping key.
+    wrap-key: func(mechanism: mechanism, wrapping-key: borrow<object>, key: borrow<object>) -> result<bytes, error-code>;
+
+    /// Unwrap a key blob into a new object on the token.
+    unwrap-key: func(mechanism: mechanism, wrapping-key: borrow<object>, wrapped-key: bytes, template: attribute-template) -> result<object, error-code>;
+
+    /// Seed the token RNG with additional entropy.
+    seed-random: func(seed: bytes) -> result<_, error-code>;
+
+    /// Generate random bytes from the token RNG.
+    generate-random: func(len: u32) -> result<bytes, error-code>;
+  }
+}

@@ -1,0 +1,49 @@
+package pkcs11:registry;
+
+interface provider-registry {
+  /// Unique identifier assigned to each registered provider.
+  type provider-id = u32;
+
+  /// Configuration options supplied when registering a provider module.
+  record provider-spec {
+    /// Canonical name used to reference the provider.
+    name: string,
+    /// Filesystem path or logical locator of the PKCS#11 module.
+    module-path: string,
+    /// Optional human readable description surfaced to clients.
+    description: option<string>,
+    /// Default configuration string (e.g. `module=/path/to/lib.so`).
+    default-config: option<string>,
+  }
+
+  /// Summary of a registered provider exposed to clients.
+  record provider-summary {
+    id: provider-id,
+    name: string,
+    module-path: string,
+    description: option<string>,
+    default-config: option<string>,
+    /// Milliseconds since the Unix epoch tracking the last update.
+    last-updated-ms: option<u64>,
+  }
+
+  /// Failure modes surfaced while mutating or reading the registry.
+  variant registry-error {
+    duplicate-name,
+    invalid-argument,
+    not-found,
+    storage,
+  }
+
+  /// Register a new provider entry or update an existing one with the same name.
+  register-provider: func(spec: provider-spec) -> result<provider-summary, registry-error>;
+
+  /// Remove a provider entry by name.
+  unregister-provider: func(name: string) -> result<_, registry-error>;
+
+  /// List all registered providers with metadata that clients can enumerate.
+  list-providers: func() -> list<provider-summary>;
+
+  /// Fetch a provider by name.
+  find-provider: func(name: string) -> result<provider-summary, registry-error>;
+}

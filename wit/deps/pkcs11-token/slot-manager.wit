@@ -1,0 +1,62 @@
+package pkcs11:token;
+
+interface slot-manager {
+  use pkcs11:core/core.{
+    error-code,
+    mechanism-info,
+    mechanism-type,
+    module-info,
+    session-flags,
+    slot-id,
+    slot-info,
+    token-info,
+  };
+  use pkcs11:session/session.{session};
+
+  /// Flags accepted by wait-for-slot-event.
+  flags wait-flags {
+    dont-block,
+  }
+
+  /// Slot event summary returned after an interrupt.
+  record slot-event {
+    slot: slot-id,
+    token-present: bool,
+  }
+
+  /// Fetch global metadata about the loaded PKCS#11 module.
+  get-info: func() -> result<module-info, error-code>;
+
+  /// Initialize the provider and associated PKCS#11 module.
+  initialize: func(config: option<string>) -> result<_, error-code>;
+
+  /// Finalize the provider, releasing the PKCS#11 module.
+  finalize: func() -> result<_, error-code>;
+
+  /// Reset a token to its factory state and set the Security Officer PIN.
+  init-token: func(slot: slot-id, so-pin: option<string>, label: string) -> result<_, error-code>;
+
+  /// Return the list of available slot identifiers. When `token-present` is true only slots with tokens appear.
+  get-slot-list: func(token-present: bool) -> result<list<slot-id>, error-code>;
+
+  /// Fetch information about a specific slot.
+  get-slot-info: func(slot: slot-id) -> result<slot-info, error-code>;
+
+  /// Fetch token metadata for the given slot.
+  get-token-info: func(slot: slot-id) -> result<token-info, error-code>;
+
+  /// Wait for a token insertion or removal event.
+  wait-for-slot-event: func(wait-flags: wait-flags) -> result<slot-event, error-code>;
+
+  /// Close every session opened on the specified slot.
+  close-all-sessions: func(slot: slot-id) -> result<_, error-code>;
+
+  /// Get the list of mechanisms supported by the slot's token.
+  get-mechanism-list: func(slot: slot-id) -> result<list<mechanism-type>, error-code>;
+
+  /// Get mechanism capabilities and key length ranges.
+  get-mechanism-info: func(slot: slot-id, mechanism: mechanism-type) -> result<mechanism-info, error-code>;
+
+  /// Open a new session against the provided slot identifier.
+  open-session: func(slot: slot-id, session-flags: session-flags) -> result<session, error-code>;
+}

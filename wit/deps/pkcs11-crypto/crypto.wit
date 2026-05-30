@@ -1,0 +1,435 @@
+package pkcs11:crypto;
+
+interface crypto {
+  use pkcs11:buffer/buffer.{bytes, chunk};
+  use pkcs11:core/core.{error-code, mechanism, mechanism-type, object-handle};
+
+  /// RSA-OAEP mechanism parameters.
+  record rsa-oaep-param {
+    hash: mechanism-type,
+    mgf: mechanism-type,
+    source: mechanism-type,
+    source-data: option<bytes>,
+  }
+
+  /// RSA-PSS mechanism parameters.
+  record rsa-pss-param {
+    hash: mechanism-type,
+    mgf: mechanism-type,
+    salt-length: u32,
+  }
+
+  /// CK_AES_GCM_PARAMS analogue.
+  record aes-gcm-param {
+    iv: bytes,
+    aad: bytes,
+    tag-bits: u32,
+  }
+
+  /// CK_AES_CCM_PARAMS analogue.
+  record aes-ccm-param {
+    nonce: bytes,
+    aad: bytes,
+    data-length: u32,
+    mac-length: u32,
+  }
+
+  /// ChaCha20-Poly1305 parameters.
+  record chacha20-poly1305-param {
+    nonce: bytes,
+    aad: bytes,
+    tag-length: u32,
+  }
+
+  /// HKDF extract/expand mode selection.
+  enum hkdf-mode {
+    extract-and-expand,
+    extract,
+    expand,
+  }
+
+  /// HKDF mechanism parameters.
+  record hkdf-param {
+    mode: hkdf-mode,
+    hash: mechanism-type,
+    salt: option<bytes>,
+    info: option<bytes>,
+  }
+
+  /// TLS PRF parameters (legacy and TLS 1.2 share the same structure with different mechanism tags).
+  record tls-prf-param {
+    label: string,
+    seed: bytes,
+    output-length: u32,
+  }
+
+  /// ECDH1 key derivation parameters (CK_ECDH1_DERIVE_PARAMS).
+  record ecdh1-derive-param {
+    kdf: mechanism-type,
+    shared-data: option<bytes>,
+    public-data: bytes,
+  }
+
+  /// ECDH-AES key wrap parameters.
+  record ecdh-aes-key-wrap-param {
+    aes-key-bits: u32,
+    kdf: mechanism-type,
+    shared-data: option<bytes>,
+    public-data: bytes,
+  }
+
+  /// PBKDF2 key derivation parameters (CK_PKCS5_PBKD2_PARAMS).
+  record pbkdf2-param {
+    salt: bytes,
+    iterations: u32,
+    prf: mechanism-type,
+  }
+
+  /// Password-based encryption parameters.
+  record pbe-param {
+    password: bytes,
+    salt: bytes,
+    iteration: u32,
+  }
+
+  /// AES key wrap parameters (CK_KEY_WRAP_SET_OAEP_PARAMS).
+  record key-wrap-set-oaep-param {
+    bc: u8,
+    x: bytes,
+  }
+
+  /// AES-CTR parameters.
+  record aes-ctr-param {
+    counter-bits: u32,
+    cb: bytes,
+  }
+
+  /// DES-CBC/AES-CBC parameters (simple IV).
+  record iv-param {
+    iv: bytes,
+  }
+
+  /// RC2 CBC parameters.
+  record rc2-cbc-param {
+    effective-bits: u32,
+    iv: bytes,
+  }
+
+  /// RC2 MAC general parameters.
+  record rc2-mac-general-param {
+    effective-bits: u32,
+    mac-length: u32,
+  }
+
+  /// RC5 parameters.
+  record rc5-param {
+    wordsize: u32,
+    rounds: u32,
+  }
+
+  /// RC5 CBC parameters.
+  record rc5-cbc-param {
+    wordsize: u32,
+    rounds: u32,
+    iv: bytes,
+  }
+
+  /// RC5 MAC general parameters.
+  record rc5-mac-general-param {
+    wordsize: u32,
+    rounds: u32,
+    mac-length: u32,
+  }
+
+  /// MAC general parameters.
+  record mac-general-param {
+    mac-length: u32,
+  }
+
+  /// DES-CBC encrypt data parameters.
+  record des-cbc-encrypt-data-param {
+    iv: bytes,
+    data: bytes,
+  }
+
+  /// AES-CBC encrypt data parameters.
+  record aes-cbc-encrypt-data-param {
+    iv: bytes,
+    data: bytes,
+  }
+
+  /// SKIPJACK parameters.
+  record skipjack-param {
+    iv: bytes,
+  }
+
+  /// SKIPJACK relayx parameters.
+  record skipjack-relayx-param {
+    old-wrapped-x: bytes,
+    old-password: bytes,
+    old-pubdata: bytes,
+    old-random-a: bytes,
+    new-password: bytes,
+    new-pubdata: bytes,
+    new-random-a: bytes,
+  }
+
+  /// KEA derive parameters.
+  record kea-derive-param {
+    is-sender: bool,
+    random-a: bytes,
+    random-b: bytes,
+    public-data: bytes,
+  }
+
+  /// SSL3/TLS PRE-MASTER key generation parameters.
+  record ssl3-pre-master-key-gen-param {
+    client-version: tuple<u8, u8>,
+  }
+
+  /// SSL3/TLS MASTER key derivation parameters.
+  record ssl3-master-key-derive-param {
+    client-version: tuple<u8, u8>,
+    random-info: bytes,
+  }
+
+  /// SSL3/TLS key and MAC derivation parameters.
+  record ssl3-key-mat-param {
+    mac-size-bits: u32,
+    key-size-bits: u32,
+    iv-size-bits: u32,
+    is-export: bool,
+    random-info: bytes,
+  }
+
+  /// TLS 1.2 MAC parameters.
+  record tls12-mac-param {
+    hash-alg: mechanism-type,
+  }
+
+  /// TLS 1.2 KDF parameters.
+  record tls12-kdf-param {
+    hash-alg: mechanism-type,
+    label: bytes,
+    random-info: bytes,
+  }
+
+  /// TLS 1.2 Master key derivation parameters.
+  record tls12-master-key-derive-param {
+    hash-alg: mechanism-type,
+    random-info: bytes,
+    client-version: tuple<u8, u8>,
+  }
+
+  /// TLS 1.2 key material parameters.
+  record tls12-key-mat-param {
+    mac-size-bits: u32,
+    key-size-bits: u32,
+    iv-size-bits: u32,
+    is-export: bool,
+    random-info: bytes,
+    hash-alg: mechanism-type,
+  }
+
+  /// WTLS PRF parameters.
+  record wtls-prf-param {
+    digest-mechanism: mechanism-type,
+    seed: bytes,
+    label: bytes,
+    output-length: u32,
+  }
+
+  /// WTLS key material parameters.
+  record wtls-key-mat-param {
+    digest-mechanism: mechanism-type,
+    mac-size-bits: u32,
+    key-size-bits: u32,
+    iv-size-bits: u32,
+    sequence-number: u32,
+    is-export: bool,
+    random-info: bytes,
+  }
+
+  /// CMS SIG parameters.
+  record cms-sig-param {
+    certificate-handle: object-handle,
+    signing-mechanism: option<mechanism-type>,
+    digest-mechanism: option<mechanism-type>,
+    content-type: string,
+    requested-attributes: bytes,
+    required-attributes: bytes,
+  }
+
+  /// Key derivation string data.
+  record key-derivation-string-data {
+    data: bytes,
+  }
+
+  /// Extract key from key parameters.
+  record extract-param {
+    bit-offset: u32,
+  }
+
+  /// DH/ECDH domain parameters.
+  record dh-params {
+    prime: bytes,
+    base: bytes,
+  }
+
+  /// X9.42 DH domain parameters.
+  record x942-dh-params {
+    prime: bytes,
+    base: bytes,
+    subprime: bytes,
+  }
+
+  /// X9.42 DH key derivation parameters.
+  record x942-dh1-derive-param {
+    kdf: mechanism-type,
+    other-info: bytes,
+    public-data: bytes,
+  }
+
+  /// X9.42 DH MQV derivation parameters.
+  record x942-mqv-derive-param {
+    kdf: mechanism-type,
+    other-info: bytes,
+    public-key: object-handle,
+    public-data: bytes,
+    private-data-len: u32,
+    private-data: option<object-handle>,
+    public-data2: bytes,
+  }
+
+  /// DSA parameter generation parameters.
+  record dsa-parameter-gen-param {
+    hash: mechanism-type,
+    seed: bytes,
+    index: u32,
+  }
+
+  /// GOSTR3410 key wrap parameters.
+  record gostr3410-key-wrap-param {
+    wrap-oid: bytes,
+    ukm: bytes,
+  }
+
+  /// GOSTR3410 derivation parameters.
+  record gostr3410-derive-param {
+    kdf: mechanism-type,
+    public-data: bytes,
+    ukm: bytes,
+  }
+
+  /// Union of strongly typed mechanism parameter payloads.
+  variant mechanism-parameter {
+    empty,
+    // RSA mechanisms
+    rsa-oaep(rsa-oaep-param),
+    rsa-pss(rsa-pss-param),
+    // AES mechanisms
+    aes-gcm(aes-gcm-param),
+    aes-ccm(aes-ccm-param),
+    aes-ctr(aes-ctr-param),
+    aes-cbc-encrypt-data(aes-cbc-encrypt-data-param),
+    // ChaCha20-Poly1305
+    chacha20-poly1305(chacha20-poly1305-param),
+    // ECDH mechanisms
+    ecdh1-derive(ecdh1-derive-param),
+    ecdh-aes-key-wrap(ecdh-aes-key-wrap-param),
+    // PBKDF2 and PBE
+    pbkdf2(pbkdf2-param),
+    pbe(pbe-param),
+    // Key derivation
+    hkdf(hkdf-param),
+    tls-prf(tls-prf-param),
+    ssl3-pre-master-key-gen(ssl3-pre-master-key-gen-param),
+    ssl3-master-key-derive(ssl3-master-key-derive-param),
+    ssl3-key-mat(ssl3-key-mat-param),
+    tls12-mac(tls12-mac-param),
+    tls12-kdf(tls12-kdf-param),
+    tls12-master-key-derive(tls12-master-key-derive-param),
+    tls12-key-mat(tls12-key-mat-param),
+    wtls-prf(wtls-prf-param),
+    wtls-key-mat(wtls-key-mat-param),
+    key-derivation-string(key-derivation-string-data),
+    extract-key(extract-param),
+    // DES/RC mechanisms
+    iv(iv-param),
+    rc2-cbc(rc2-cbc-param),
+    rc2-mac-general(rc2-mac-general-param),
+    rc5(rc5-param),
+    rc5-cbc(rc5-cbc-param),
+    rc5-mac-general(rc5-mac-general-param),
+    des-cbc-encrypt-data(des-cbc-encrypt-data-param),
+    mac-general(mac-general-param),
+    // SKIPJACK mechanisms
+    skipjack(skipjack-param),
+    skipjack-relayx(skipjack-relayx-param),
+    // KEA
+    kea-derive(kea-derive-param),
+    // Key wrapping
+    key-wrap-set-oaep(key-wrap-set-oaep-param),
+    // DH mechanisms
+    dh-params(dh-params),
+    x942-dh-params(x942-dh-params),
+    x942-dh1-derive(x942-dh1-derive-param),
+    x942-mqv-derive(x942-mqv-derive-param),
+    // DSA
+    dsa-parameter-gen(dsa-parameter-gen-param),
+    // GOST
+    gostr3410-key-wrap(gostr3410-key-wrap-param),
+    gostr3410-derive(gostr3410-derive-param),
+    // CMS
+    cms-sig(cms-sig-param),
+    // Raw fallback for vendor-specific or unknown mechanisms
+    raw(bytes),
+  }
+
+  /// Streaming encrypt operation handle.
+  resource encryptor {
+    update: func(part: chunk) -> result<bytes, error-code>;
+    final: func(max-size: u32) -> result<bytes, error-code>;
+    abort: func() -> result<_, error-code>;
+  }
+
+  /// Streaming decrypt operation handle.
+  resource decryptor {
+    update: func(part: chunk) -> result<bytes, error-code>;
+    final: func(max-size: u32) -> result<bytes, error-code>;
+    abort: func() -> result<_, error-code>;
+  }
+
+  /// Streaming signature generation handle.
+  resource signer {
+    update: func(part: chunk) -> result<_, error-code>;
+    final: func() -> result<bytes, error-code>;
+    abort: func() -> result<_, error-code>;
+  }
+
+  /// Streaming signature verification handle.
+  resource verifier {
+    update: func(part: chunk) -> result<_, error-code>;
+    final: func(signature: bytes) -> result<_, error-code>;
+    abort: func() -> result<_, error-code>;
+  }
+
+  /// Streaming digest handle.
+  resource digester {
+    update: func(part: chunk) -> result<_, error-code>;
+    final: func() -> result<bytes, error-code>;
+    abort: func() -> result<_, error-code>;
+  }
+
+  // Note: Dual-purpose cryptographic operations (C_DigestEncryptUpdate,
+  // C_DecryptDigestUpdate, C_SignEncryptUpdate, C_DecryptVerifyUpdate) are
+  // intentionally omitted. These are rarely used in modern applications and
+  // can be composed from separate single-purpose operations for better clarity
+  // and flexibility. They may be added in a future version if there is demand.
+
+  /// Result from a key derivation flow.
+  record derived-key {
+    base: object-handle,
+    mechanism: mechanism,
+  }
+}

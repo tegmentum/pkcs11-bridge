@@ -1,0 +1,30 @@
+package pkcs11:util;
+
+interface util {
+  use pkcs11:buffer/buffer.{bytes};
+
+  /// PKCS#11 date formatted as YYYYMMDD. Zero fields indicate "no date".
+  record calendar-date {
+    year: u16,
+    month: u8,
+    day: u8,
+  }
+
+  /// Big integer representation used by domain parameters.
+  type big-int = bytes;
+
+  /// Host callback supplying sensitive data such as PINs.
+  resource pin-provider {
+    /// Prompt for a secret. Implementations may display secure UI or delegate to hardware.
+    request-secret: func(label: option<string>, attempts-remaining: option<u8>) -> bytes;
+
+    /// Zeroize intermediate buffers after use.
+    clear: func();
+  }
+
+  /// Credential wrapper used for login and PIN management flows.
+  variant credential {
+    inline(bytes),
+    provider(pin-provider),
+  }
+}

@@ -1,0 +1,39 @@
+package pkcs11:object;
+
+interface object {
+  use pkcs11:buffer/buffer.{bytes};
+  use pkcs11:core/core.{attribute, attribute-tag, attribute-template, error-code, object-handle};
+
+  /// Resource wrapper around a CK_OBJECT_HANDLE.
+  resource object {
+    /// Retrieve the raw handle for diagnostics or interoperability.
+    get-handle: func() -> object-handle;
+
+    /// Return the size in bytes of the object on the token.
+    get-size: func() -> result<u64, error-code>;
+
+    /// Read attribute values from the token.
+    get-attributes: func(tags: list<attribute-tag>) -> result<list<attribute>, error-code>;
+
+    /// Set attribute values on the token.
+    set-attributes: func(template: attribute-template) -> result<_, error-code>;
+
+    /// Destroy the object if it is transient or destroyable.
+    destroy: func() -> result<_, error-code>;
+  }
+
+  /// Iterator resource for `C_FindObjects` style searches.
+  resource search {
+    /// Fetch up to `max` matching object handles.
+    next: func(max: u32) -> result<list<object-handle>, error-code>;
+
+    /// Finalize an active search operation.
+    finish: func() -> result<_, error-code>;
+  }
+
+  /// Buffer returned by wrap operations.
+  record wrapped-object {
+    algorithm: string,
+    payload: bytes,
+  }
+}
