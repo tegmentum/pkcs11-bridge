@@ -41,6 +41,15 @@ use pkcs11::util::util as p11_util;
 /// typical openssl + pkcs11 deployment uses; the broader RFC 7512
 /// surface (id, library-version, manufacturer-id, model, ...) lands
 /// in Phase 8 when real users hit cases the simpler form misses.
+///
+/// Two extension attributes outside the RFC, useful for the dev /
+/// softhsm flow:
+///   init=true            -- self-provision the token + key on first
+///                            use (mirrors keystore-pkcs11's pattern)
+///   so-pin=NNNN          -- security-officer PIN for token init
+///                            (defaults to the same value as pin-value)
+///   algorithm=NAME       -- which key to generate when init=true.
+///                            Accepted: "ecdsa-p256" (default), "rsa-2048".
 #[derive(Default, Debug, Clone)]
 struct Pkcs11Uri {
     /// CK_SLOT_ID. Either slot-id or token-label must be set; we
@@ -55,6 +64,13 @@ struct Pkcs11Uri {
     /// PIN from `pin-value=`. Phase 4 doesn't yet support
     /// `pin-source=` (which would fetch from a file/URL).
     pin: Option<String>,
+    /// Extension: auto-init the token + generate the key if absent.
+    init: bool,
+    /// Extension: SO PIN for `init=true` (defaults to `pin`).
+    so_pin: Option<String>,
+    /// Extension: which algorithm to generate on init. Defaults to
+    /// "ecdsa-p256".
+    algorithm: Option<String>,
 }
 
 impl Pkcs11Uri {
@@ -78,6 +94,10 @@ impl Pkcs11Uri {
                 "object"    => out.object = Some(v),
                 "id"        => out.id = Some(v.into_bytes()),
                 "pin-value" => out.pin = Some(v),
+                "init"      => out.init = matches!(v.as_str(),
+                                                   "true" | "1" | "yes" | "auto"),
+                "so-pin"    => out.so_pin = Some(v),
+                "algorithm" => out.algorithm = Some(v),
                 // Tolerated but ignored in Phase 4.
                 "token" | "manufacturer" | "model" | "library-version"
                   | "library-manufacturer" | "library-description"
@@ -140,30 +160,42 @@ mod ck {
     pub const CKK_RSA:  u32 = 0x00;
     pub const CKK_EC:   u32 = 0x03;
     // Attributes (CKA_*)
-    pub const CKA_CLASS:          u32 = 0x00;
-    pub const CKA_LABEL:          u32 = 0x03;
-    pub const CKA_KEY_TYPE:       u32 = 0x100;
-    pub const CKA_ID:             u32 = 0x102;
-    pub const CKA_MODULUS:        u32 = 0x120;
-    pub const CKA_PUBLIC_EXPONENT:u32 = 0x122;
-    pub const CKA_EC_PARAMS:      u32 = 0x180;
-    pub const CKA_EC_POINT:       u32 = 0x181;
+    pub const CKA_CLASS:           u32 = 0x00;
+    pub const CKA_TOKEN:           u32 = 0x01;  // persistent (not session) object
+    pub const CKA_PRIVATE:         u32 = 0x02;  // hide on public-class enumerations
+    pub const CKA_LABEL:           u32 = 0x03;
+    pub const CKA_KEY_TYPE:        u32 = 0x100;
+    pub const CKA_ID:              u32 = 0x102;
+    pub const CKA_SIGN:            u32 = 0x108;  // allow CKO_PRIVATE_KEY to sign
+    pub const CKA_VERIFY:          u32 = 0x10A;  // allow CKO_PUBLIC_KEY to verify
+    pub const CKA_MODULUS:         u32 = 0x120;
+    pub const CKA_MODULUS_BITS:    u32 = 0x121;
+    pub const CKA_PUBLIC_EXPONENT: u32 = 0x122;
+    pub const CKA_EC_PARAMS:       u32 = 0x180;
+    pub const CKA_EC_POINT:        u32 = 0x181;
     // Mechanisms (CKM_*) -- the ones we map. u64 because that's the
     // pkcs11-wit type.
-    pub const CKM_RSA_PKCS:           u64 = 0x0001;
-    pub const CKM_RSA_X_509:          u64 = 0x0003;
-    pub const CKM_RSA_PKCS_OAEP:      u64 = 0x0009;
-    pub const CKM_SHA256_RSA_PKCS:    u64 = 0x0040;
-    pub const CKM_SHA384_RSA_PKCS:    u64 = 0x0041;
-    pub const CKM_SHA512_RSA_PKCS:    u64 = 0x0042;
-    pub const CKM_SHA256_RSA_PKCS_PSS:u64 = 0x0043;
-    pub const CKM_SHA384_RSA_PKCS_PSS:u64 = 0x0044;
-    pub const CKM_SHA512_RSA_PKCS_PSS:u64 = 0x0045;
-    pub const CKM_ECDSA:              u64 = 0x1041;
-    pub const CKM_ECDSA_SHA256:       u64 = 0x1044;
-    pub const CKM_ECDSA_SHA384:       u64 = 0x1045;
-    pub const CKM_ECDSA_SHA512:       u64 = 0x1046;
-    pub const CKM_EDDSA:              u64 = 0x1057;
+    pub const CKM_RSA_PKCS_KEY_PAIR_GEN: u64 = 0x0000;
+    pub const CKM_RSA_PKCS:              u64 = 0x0001;
+    pub const CKM_RSA_X_509:             u64 = 0x0003;
+    pub const CKM_RSA_PKCS_OAEP:         u64 = 0x0009;
+    pub const CKM_SHA256_RSA_PKCS:       u64 = 0x0040;
+    pub const CKM_SHA384_RSA_PKCS:       u64 = 0x0041;
+    pub const CKM_SHA512_RSA_PKCS:       u64 = 0x0042;
+    pub const CKM_SHA256_RSA_PKCS_PSS:   u64 = 0x0043;
+    pub const CKM_SHA384_RSA_PKCS_PSS:   u64 = 0x0044;
+    pub const CKM_SHA512_RSA_PKCS_PSS:   u64 = 0x0045;
+    pub const CKM_ECDSA_KEY_PAIR_GEN:    u64 = 0x1040;
+    pub const CKM_ECDSA:                 u64 = 0x1041;
+    pub const CKM_ECDSA_SHA256:          u64 = 0x1044;
+    pub const CKM_ECDSA_SHA384:          u64 = 0x1045;
+    pub const CKM_ECDSA_SHA512:          u64 = 0x1046;
+    pub const CKM_EDDSA:                 u64 = 0x1057;
+
+    // ECDSA P-256 named-curve DER: OID 1.2.840.10045.3.1.7
+    pub const EC_PARAMS_P256: &[u8] = &[
+        0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+    ];
 }
 
 fn map_signature_mech(m: &kb::SignatureMechanism) -> Result<u64, kb::BackendError> {
@@ -240,20 +272,150 @@ fn build_rsa_spki(modulus: &[u8], public_exponent: &[u8])
 
 fn open_session_for(uri: &Pkcs11Uri) -> Result<p11_session::Session, kb::BackendError> {
     // Best-effort initialize -- many hosts auto-init on first call,
-    // others require explicit. Errors are ignored if it's "already-
-    // initialized".
+    // others require explicit. Ignored if "already-initialized".
     let _ = p11_slot::initialize(None);
-    let slot = uri.slot_id.ok_or_else(||
+    let target_slot = uri.slot_id.ok_or_else(||
         kb::BackendError::Internal("missing slot-id".into()))? as u32;
-    let flags = p11_core::SessionFlags::SERIAL_SESSION;
-    let sess = p11_slot::open_session(slot, flags)
-        .map_err(ck_error_to_backend)?;
+
+    let flags = p11_core::SessionFlags::SERIAL_SESSION
+              | p11_core::SessionFlags::RW_SESSION;
+
+    // Try the requested slot first. If it errors (typical:
+    // CKR_TOKEN_NOT_PRESENT 0xE1) and the URI asked for init=true,
+    // provision a token and rediscover the slot id; otherwise
+    // propagate the error.
+    let sess = match p11_slot::open_session(target_slot, flags) {
+        Ok(s)  => s,
+        Err(e) if uri.init => {
+            // Initialize a token on whatever slot is offered first.
+            // SoftHSM2's slot id can shift after init; re-enumerate
+            // post-init to find where the token landed.
+            let any_slot = *p11_slot::get_slot_list(false)
+                .map_err(ck_error_to_backend)?
+                .first()
+                .ok_or_else(|| kb::BackendError::Internal(
+                    "no PKCS#11 slots available for init".into()))?;
+            let so_pin = uri.so_pin.clone()
+                .or_else(|| uri.pin.clone())
+                .unwrap_or_else(|| "1234".into());
+            p11_slot::init_token(any_slot, Some(&so_pin), "pkcs11-bridge")
+                .map_err(ck_error_to_backend)?;
+            let token_slot = *p11_slot::get_slot_list(true)
+                .map_err(ck_error_to_backend)?
+                .first()
+                .ok_or_else(|| kb::BackendError::Internal(
+                    "no token slot after init".into()))?;
+
+            // Become SO + set the user PIN, then close the SO
+            // session and reopen for the regular user-login path
+            // below.
+            let so_sess = p11_slot::open_session(token_slot, flags)
+                .map_err(ck_error_to_backend)?;
+            so_sess.login(p11_core::UserType::So,
+                          p11_util::Credential::Inline(so_pin.as_bytes().to_vec()))
+                .map_err(ck_error_to_backend)?;
+            let user_pin = uri.pin.clone()
+                .unwrap_or_else(|| "1234".into());
+            so_sess.init_pin(p11_util::Credential::Inline(
+                user_pin.as_bytes().to_vec()))
+                .map_err(ck_error_to_backend)?;
+            let _ = so_sess.logout();
+            let _ = so_sess.close();
+
+            p11_slot::open_session(token_slot, flags)
+                .map_err(ck_error_to_backend)?
+        }
+        Err(e) => return Err(ck_error_to_backend(e)),
+    };
+
     if let Some(pin) = &uri.pin {
         let cred = p11_util::Credential::Inline(pin.as_bytes().to_vec());
         sess.login(p11_core::UserType::User, cred)
             .map_err(ck_error_to_backend)?;
     }
     Ok(sess)
+}
+
+/// Generate a fresh ECDSA P-256 or RSA-2048 keypair under the given
+/// label on the provided session. Used only on the init=true path.
+fn generate_keypair_for(sess: &p11_session::Session, uri: &Pkcs11Uri)
+    -> Result<(), kb::BackendError> {
+    let label = uri.object.clone().unwrap_or_else(|| "pkcs11-bridge-key".into());
+    let algo  = uri.algorithm.as_deref().unwrap_or("ecdsa-p256");
+    let id_bytes = uri.id.clone().unwrap_or_else(|| label.as_bytes().to_vec());
+
+    let (mech, pub_template, priv_template) = match algo {
+        "ecdsa-p256" => {
+            let mech = p11_core::Mechanism {
+                kind: ck::CKM_ECDSA_KEY_PAIR_GEN,
+                parameter: None,
+            };
+            let pub_t = vec![
+                p11_core::Attribute { tag: ck::CKA_TOKEN,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_VERIFY,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_LABEL,
+                    value: p11_core::AttributeValue::ByteString(label.as_bytes().to_vec()) },
+                p11_core::Attribute { tag: ck::CKA_ID,
+                    value: p11_core::AttributeValue::ByteString(id_bytes.clone()) },
+                p11_core::Attribute { tag: ck::CKA_EC_PARAMS,
+                    value: p11_core::AttributeValue::ByteString(ck::EC_PARAMS_P256.to_vec()) },
+            ];
+            let priv_t = vec![
+                p11_core::Attribute { tag: ck::CKA_TOKEN,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_PRIVATE,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_SIGN,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_LABEL,
+                    value: p11_core::AttributeValue::ByteString(label.as_bytes().to_vec()) },
+                p11_core::Attribute { tag: ck::CKA_ID,
+                    value: p11_core::AttributeValue::ByteString(id_bytes) },
+            ];
+            (mech, pub_t, priv_t)
+        }
+        "rsa-2048" => {
+            let mech = p11_core::Mechanism {
+                kind: ck::CKM_RSA_PKCS_KEY_PAIR_GEN,
+                parameter: None,
+            };
+            let pub_t = vec![
+                p11_core::Attribute { tag: ck::CKA_TOKEN,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_VERIFY,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_LABEL,
+                    value: p11_core::AttributeValue::ByteString(label.as_bytes().to_vec()) },
+                p11_core::Attribute { tag: ck::CKA_ID,
+                    value: p11_core::AttributeValue::ByteString(id_bytes.clone()) },
+                p11_core::Attribute { tag: ck::CKA_MODULUS_BITS,
+                    value: p11_core::AttributeValue::Uint32(2048) },
+                p11_core::Attribute { tag: ck::CKA_PUBLIC_EXPONENT,
+                    value: p11_core::AttributeValue::ByteString(vec![0x01, 0x00, 0x01]) },
+            ];
+            let priv_t = vec![
+                p11_core::Attribute { tag: ck::CKA_TOKEN,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_PRIVATE,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_SIGN,
+                    value: p11_core::AttributeValue::Boolean(true) },
+                p11_core::Attribute { tag: ck::CKA_LABEL,
+                    value: p11_core::AttributeValue::ByteString(label.as_bytes().to_vec()) },
+                p11_core::Attribute { tag: ck::CKA_ID,
+                    value: p11_core::AttributeValue::ByteString(id_bytes) },
+            ];
+            (mech, pub_t, priv_t)
+        }
+        other => return Err(kb::BackendError::MechanismNotSupported(
+            format!("init=true algorithm={other} -- only ecdsa-p256 / rsa-2048 supported"))),
+    };
+
+    sess.generate_key_pair(&mech, &pub_template, &priv_template)
+        .map_err(ck_error_to_backend)?;
+    Ok(())
 }
 
 fn find_object(sess: &p11_session::Session, uri: &Pkcs11Uri, class: u32)
@@ -316,9 +478,20 @@ impl kb::GuestKey for Key {
             panic!("pkcs11-bridge: bad URI: {e}"));
         let sess = open_session_for(&parsed).unwrap_or_else(|e|
             panic!("pkcs11-bridge: open-session failed: {:?}", e));
-        let priv_obj = find_object(&sess, &parsed, ck::CKO_PRIVATE_KEY)
-            .unwrap_or_else(|e|
-                panic!("pkcs11-bridge: private-key lookup failed: {:?}", e));
+        // First find attempt. If the URI asked for init=true and the
+        // private key doesn't exist, generate it then look it up
+        // again. Note: open_session_for already handled token
+        // provisioning (init_token + init_pin) when init=true.
+        let priv_obj = match find_object(&sess, &parsed, ck::CKO_PRIVATE_KEY) {
+            Ok(obj) => obj,
+            Err(_) if parsed.init => {
+                generate_keypair_for(&sess, &parsed).unwrap_or_else(|e|
+                    panic!("pkcs11-bridge: keygen failed: {:?}", e));
+                find_object(&sess, &parsed, ck::CKO_PRIVATE_KEY).unwrap_or_else(|e|
+                    panic!("pkcs11-bridge: post-keygen lookup failed: {:?}", e))
+            }
+            Err(e) => panic!("pkcs11-bridge: private-key lookup failed: {:?}", e),
+        };
         Self {
             uri: parsed,
             session: sess,
@@ -435,8 +608,17 @@ impl kb::GuestKey for Key {
         -> Result<Vec<u8>, kb::BackendError> {
         let ckm = map_signature_mech(&mech)?;
         let mechanism = p11_core::Mechanism { kind: ckm, parameter: None };
-        self.session.sign(&mechanism, &self.private_obj, &tbs)
-            .map_err(ck_error_to_backend)
+        let raw = self.session.sign(&mechanism, &self.private_obj, &tbs)
+            .map_err(ck_error_to_backend)?;
+        // ECDSA-family mechanisms in PKCS#11 return raw P1363 (r||s).
+        // The tegmentum:key-backend WIT contract says ECDSA returns
+        // DER -- convert on the way out. Other mechs pass through.
+        if matches!(mech, kb::SignatureMechanism::Ecdsa(_)) {
+            spki::ecdsa_raw_to_der(&raw)
+                .map_err(|e| kb::BackendError::Internal(format!("ECDSA DER: {e}")))
+        } else {
+            Ok(raw)
+        }
     }
 
     fn verify(&self, tbs: Vec<u8>, signature: Vec<u8>, mech: kb::SignatureMechanism)

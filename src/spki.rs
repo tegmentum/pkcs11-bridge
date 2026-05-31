@@ -123,6 +123,24 @@ pub fn build_ec_spki(ec_params_der: &[u8], ec_point_der: &[u8])
     Ok(der_seq(&spki))
 }
 
+/// Wrap a raw IEEE P1363 ECDSA signature (`r || s`, fixed-width
+/// halves) into the DER `SEQUENCE { INTEGER r, INTEGER s }` form
+/// OpenSSL and X.509 expect. PKCS#11's CKM_ECDSA{,_SHA*} returns
+/// raw P1363; the tegmentum:key-backend WIT contract specifies DER,
+/// so the bridge converts on the return path from key.sign.
+pub fn ecdsa_raw_to_der(raw: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if raw.is_empty() || raw.len() % 2 != 0 {
+        return Err("ECDSA raw signature must be a non-empty even-length r||s");
+    }
+    let half = raw.len() / 2;
+    let r = der_integer(&raw[..half]);
+    let s = der_integer(&raw[half..]);
+    let mut seq_body = Vec::with_capacity(r.len() + s.len());
+    seq_body.extend_from_slice(&r);
+    seq_body.extend_from_slice(&s);
+    Ok(der_seq(&seq_body))
+}
+
 /// Build an RSA SubjectPublicKeyInfo:
 ///   SEQUENCE {
 ///     SEQUENCE { rsaEncryption, NULL }
