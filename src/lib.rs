@@ -192,10 +192,82 @@ mod ck {
     pub const CKM_ECDSA_SHA512:          u64 = 0x1046;
     pub const CKM_EDDSA:                 u64 = 0x1057;
 
-    // ECDSA P-256 named-curve DER: OID 1.2.840.10045.3.1.7
+    // ECDSA named-curve CKA_EC_PARAMS DER blobs (just the OID).
+    // P-256: 1.2.840.10045.3.1.7
     pub const EC_PARAMS_P256: &[u8] = &[
         0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
     ];
+    // P-384: 1.3.132.0.34
+    pub const EC_PARAMS_P384: &[u8] = &[
+        0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22,
+    ];
+    // P-521: 1.3.132.0.35
+    pub const EC_PARAMS_P521: &[u8] = &[
+        0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23,
+    ];
+}
+
+/// Map a CKA_EC_PARAMS byte blob (which holds a DER-encoded
+/// ECParameters; for named curves this is just an ASN.1 OID) to the
+/// SEC1/X9.62 short name OpenSSL recognises ("prime256v1", "secp384r1",
+/// "secp521r1"). Returns `None` if the curve isn't on our supported
+/// list.
+fn ec_params_to_curve_name(params: &[u8]) -> Option<&'static str> {
+    // Curve-name form is bizarrely per-curve in our openssl-wasm
+    // build: P-256 only resolves via the SEC1 SN "prime256v1", and
+    // P-384/P-521 only via the NIST SN ("P-384"/"P-521"). Pick the
+    // form each curve's TLS sigalg machinery accepts; the wit-bridge
+    // adapter's bits/group-nid table accepts both forms anyway.
+    if params == ck::EC_PARAMS_P256 { Some("prime256v1") }
+    else if params == ck::EC_PARAMS_P384 { Some("secp384r1") }
+    else if params == ck::EC_PARAMS_P521 { Some("secp521r1") }
+    else { None }
+}
+
+/// Encode CK_RSA_PKCS_PSS_PARAMS for the wasm-built SoftHSM.
+///   typedef struct CK_RSA_PKCS_PSS_PARAMS {
+///       CK_MECHANISM_TYPE hashAlg;   // CKM_SHA256 / CKM_SHA384 / ...
+///       CK_RSA_PKCS_MGF_TYPE mgf;    // CKG_MGF1_SHA256 / ...
+///       CK_ULONG sLen;               // salt length in bytes
+///   } CK_RSA_PKCS_PSS_PARAMS;
+/// CK_ULONG is 4 bytes on wasm32 (matching pkcs11-provider's
+/// marshal_mechanism convention); 12 bytes total, little-endian.
+fn encode_pkcs11_pss_params(p: &kb::RsaPssParams) -> Vec<u8> {
+    use kb::DigestAlgorithm as D;
+    // PKCS#11 v2.40 mechanism IDs for hashes.
+    let hash_alg: u32 = match p.digest {
+        D::Sha1   => 0x00000220,  // CKM_SHA_1
+        D::Sha224 => 0x00000255,  // CKM_SHA224
+        D::Sha256 => 0x00000250,  // CKM_SHA256
+        D::Sha384 => 0x00000260,  // CKM_SHA384
+        D::Sha512 => 0x00000270,  // CKM_SHA512
+        _         => 0x00000250,  // default SHA-256
+    };
+    let mgf: u32 = match p.mgf1_digest {
+        D::Sha1   => 0x00000001,  // CKG_MGF1_SHA1
+        D::Sha224 => 0x00000005,  // CKG_MGF1_SHA224
+        D::Sha256 => 0x00000002,  // CKG_MGF1_SHA256
+        D::Sha384 => 0x00000003,  // CKG_MGF1_SHA384
+        D::Sha512 => 0x00000004,  // CKG_MGF1_SHA512
+        _         => 0x00000002,
+    };
+    let salt_len: u32 = if p.salt_len == 0 {
+        match p.digest {
+            D::Sha1   => 20,
+            D::Sha224 => 28,
+            D::Sha256 => 32,
+            D::Sha384 => 48,
+            D::Sha512 => 64,
+            _         => 32,
+        }
+    } else {
+        p.salt_len
+    };
+    let mut out = Vec::with_capacity(12);
+    out.extend_from_slice(&hash_alg.to_le_bytes());
+    out.extend_from_slice(&mgf.to_le_bytes());
+    out.extend_from_slice(&salt_len.to_le_bytes());
+    out
 }
 
 fn map_signature_mech(m: &kb::SignatureMechanism) -> Result<u64, kb::BackendError> {
@@ -353,7 +425,12 @@ fn generate_keypair_for(sess: &p11_session::Session, uri: &Pkcs11Uri)
     let id_bytes = uri.id.clone().unwrap_or_else(|| label.as_bytes().to_vec());
 
     let (mech, pub_template, priv_template) = match algo {
-        "ecdsa-p256" => {
+        "ecdsa-p256" | "ecdsa-p384" | "ecdsa-p521" => {
+            let ec_params = match algo {
+                "ecdsa-p384" => ck::EC_PARAMS_P384,
+                "ecdsa-p521" => ck::EC_PARAMS_P521,
+                _            => ck::EC_PARAMS_P256,
+            };
             let mech = p11_core::Mechanism {
                 kind: ck::CKM_ECDSA_KEY_PAIR_GEN,
                 parameter: None,
@@ -368,7 +445,7 @@ fn generate_keypair_for(sess: &p11_session::Session, uri: &Pkcs11Uri)
                 p11_core::Attribute { tag: ck::CKA_ID,
                     value: p11_core::AttributeValue::ByteString(id_bytes.clone()) },
                 p11_core::Attribute { tag: ck::CKA_EC_PARAMS,
-                    value: p11_core::AttributeValue::ByteString(ck::EC_PARAMS_P256.to_vec()) },
+                    value: p11_core::AttributeValue::ByteString(ec_params.to_vec()) },
             ];
             let priv_t = vec![
                 p11_core::Attribute { tag: ck::CKA_TOKEN,
@@ -511,24 +588,60 @@ impl kb::GuestKey for Key {
 
     fn algorithm(&self) -> kb::KeyAlgorithm {
         if let Some(a) = self.algorithm.borrow().clone() { return a; }
-        // Resolve from CKA_KEY_TYPE. EC also needs CKA_EC_PARAMS for
-        // the curve name; RSA needs CKA_MODULUS for the bit-width.
+        // Resolve from CKA_KEY_TYPE; some tokens (incl. SoftHSM under
+        // CKU_USER) don't expose CKA_KEY_TYPE on the private object,
+        // so use the URI's `algorithm` flag as a backup hint before
+        // falling through to ECDSA.
         let attrs = self.private_obj
             .get_attributes(&[ck::CKA_KEY_TYPE])
             .unwrap_or_default();
-        let key_type = attrs.into_iter()
+        let from_attr = attrs.into_iter()
             .find_map(|a| match a.value {
                 p11_core::AttributeValue::KeyKind(k)   => Some(k),
                 p11_core::AttributeValue::Uint32(k)    => Some(k),
                 _                                       => None,
-            })
-            .unwrap_or(u32::MAX);
+            });
+        let key_type = from_attr.unwrap_or_else(|| match self.uri.algorithm.as_deref() {
+            Some(s) if s.starts_with("ecdsa-") => ck::CKK_EC,
+            Some(s) if s.starts_with("rsa-")   => ck::CKK_RSA,
+            _ => u32::MAX,
+        });
         let algo = match key_type {
             ck::CKK_EC => {
-                // Phase 4 hardcodes P-256 -- the broader curve list
-                // requires parsing CKA_EC_PARAMS' OID against a
-                // table. Practical: most TLS PKCS#11 keys are P-256.
-                kb::KeyAlgorithm::Ec(kb::EcInfo { curve: "P-256".into() })
+                // Resolve the curve by parsing CKA_EC_PARAMS (OID for
+                // named curves). Most tokens expose this only on the
+                // public-key object, so look there first; fall back to
+                // the URI's algorithm flag, then to prime256v1.
+                // PKCS#11 tokens vary on which object (private vs
+                // public) carries CKA_EC_PARAMS. Try both; fall back
+                // to the URI's `algorithm` flag if the token refuses
+                // to disclose the curve at all.
+                let from_priv: Option<&'static str> = self.private_obj
+                    .get_attributes(&[ck::CKA_EC_PARAMS])
+                    .ok()
+                    .and_then(|attrs| attrs.into_iter().find_map(|a| match a.value {
+                        p11_core::AttributeValue::ByteString(b) => Some(b),
+                        _ => None,
+                    }))
+                    .and_then(|b| ec_params_to_curve_name(&b));
+                let from_pub: Option<&'static str> = if from_priv.is_none() {
+                    find_object(&self.session, &self.uri, ck::CKO_PUBLIC_KEY)
+                        .ok()
+                        .and_then(|obj| obj.get_attributes(&[ck::CKA_EC_PARAMS]).ok())
+                        .and_then(|attrs| attrs.into_iter().find_map(|a| match a.value {
+                            p11_core::AttributeValue::ByteString(b) => Some(b),
+                            _ => None,
+                        }))
+                        .and_then(|b| ec_params_to_curve_name(&b))
+                } else { None };
+                let from_uri: Option<&'static str> = match self.uri.algorithm.as_deref() {
+                    Some("ecdsa-p384") => Some("secp384r1"),
+                    Some("ecdsa-p521") => Some("secp521r1"),
+                    Some("ecdsa-p256") => Some("prime256v1"),
+                    _                  => None,
+                };
+                let curve = from_priv.or(from_pub).or(from_uri).unwrap_or("prime256v1");
+                kb::KeyAlgorithm::Ec(kb::EcInfo { curve: curve.into() })
             }
             ck::CKK_RSA => {
                 // Try to read modulus bits; fall back to 2048 if the
@@ -544,7 +657,7 @@ impl kb::GuestKey for Key {
                     .unwrap_or(2048);
                 kb::KeyAlgorithm::Rsa(kb::RsaInfo { modulus_bits: bits })
             }
-            _ => kb::KeyAlgorithm::Ec(kb::EcInfo { curve: "P-256".into() }),
+            _ => kb::KeyAlgorithm::Ec(kb::EcInfo { curve: "prime256v1".into() }),
         };
         *self.algorithm.borrow_mut() = Some(algo.clone());
         algo
@@ -615,7 +728,16 @@ impl kb::GuestKey for Key {
     fn sign(&self, tbs: Vec<u8>, mech: kb::SignatureMechanism)
         -> Result<Vec<u8>, kb::BackendError> {
         let ckm = map_signature_mech(&mech)?;
-        let mechanism = p11_core::Mechanism { kind: ckm, parameter: None };
+        // RSA-PSS requires a CK_RSA_PKCS_PSS_PARAMS struct as the
+        // mechanism parameter (3 * CK_ULONG on 64-bit). Without it
+        // SoftHSM rejects with CKR_ARGUMENTS_BAD.
+        let parameter = match &mech {
+            kb::SignatureMechanism::RsaPss(p) => {
+                Some(encode_pkcs11_pss_params(p))
+            }
+            _ => None,
+        };
+        let mechanism = p11_core::Mechanism { kind: ckm, parameter };
         let raw = self.session.sign(&mechanism, &self.private_obj, &tbs)
             .map_err(ck_error_to_backend)?;
         // ECDSA-family mechanisms in PKCS#11 return raw P1363 (r||s).
@@ -632,7 +754,11 @@ impl kb::GuestKey for Key {
     fn verify(&self, tbs: Vec<u8>, signature: Vec<u8>, mech: kb::SignatureMechanism)
         -> Result<bool, kb::BackendError> {
         let ckm = map_signature_mech(&mech)?;
-        let mechanism = p11_core::Mechanism { kind: ckm, parameter: None };
+        let parameter = match &mech {
+            kb::SignatureMechanism::RsaPss(p) => Some(encode_pkcs11_pss_params(p)),
+            _ => None,
+        };
+        let mechanism = p11_core::Mechanism { kind: ckm, parameter };
         // PKCS#11 verify needs the PUBLIC key object, not the private.
         let pub_obj = find_object(&self.session, &self.uri, ck::CKO_PUBLIC_KEY)?;
         match self.session.verify(&mechanism, &pub_obj, &tbs, &signature) {
