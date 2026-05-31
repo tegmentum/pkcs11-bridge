@@ -285,8 +285,8 @@ fn open_session_for(uri: &Pkcs11Uri) -> Result<p11_session::Session, kb::Backend
     // provision a token and rediscover the slot id; otherwise
     // propagate the error.
     let sess = match p11_slot::open_session(target_slot, flags) {
-        Ok(s)  => s,
-        Err(e) if uri.init => {
+        Ok(s) => s,
+        Err(_) if uri.init => {
             // Initialize a token on whatever slot is offered first.
             // SoftHSM2's slot id can shift after init; re-enumerate
             // post-init to find where the token landed.
@@ -305,23 +305,17 @@ fn open_session_for(uri: &Pkcs11Uri) -> Result<p11_session::Session, kb::Backend
                 .first()
                 .ok_or_else(|| kb::BackendError::Internal(
                     "no token slot after init".into()))?;
-
-            // Become SO + set the user PIN, then close the SO
-            // session and reopen for the regular user-login path
-            // below.
             let so_sess = p11_slot::open_session(token_slot, flags)
                 .map_err(ck_error_to_backend)?;
             so_sess.login(p11_core::UserType::So,
                           p11_util::Credential::Inline(so_pin.as_bytes().to_vec()))
                 .map_err(ck_error_to_backend)?;
-            let user_pin = uri.pin.clone()
-                .unwrap_or_else(|| "1234".into());
+            let user_pin = uri.pin.clone().unwrap_or_else(|| "1234".into());
             so_sess.init_pin(p11_util::Credential::Inline(
                 user_pin.as_bytes().to_vec()))
                 .map_err(ck_error_to_backend)?;
             let _ = so_sess.logout();
             let _ = so_sess.close();
-
             p11_slot::open_session(token_slot, flags)
                 .map_err(ck_error_to_backend)?
         }
@@ -330,8 +324,22 @@ fn open_session_for(uri: &Pkcs11Uri) -> Result<p11_session::Session, kb::Backend
 
     if let Some(pin) = &uri.pin {
         let cred = p11_util::Credential::Inline(pin.as_bytes().to_vec());
-        sess.login(p11_core::UserType::User, cred)
-            .map_err(ck_error_to_backend)?;
+        match sess.login(p11_core::UserType::User, cred) {
+            Ok(()) => {}
+            // CKR_USER_ALREADY_LOGGED_IN (0x100 = 256) is fine -- a
+            // previous Key resource already logged the same user in.
+            // pkcs11-provider may surface this as the named variant
+            // or as Unknown(256); tolerate both.
+            Err(e) => {
+                let dbg = format!("{:?}", e);
+                if dbg.contains("UserAlreadyLoggedIn") || dbg.contains("Unknown(256)") {
+                    // Fine -- a previous Key resource on this slot
+                    // already logged the same user in.
+                } else {
+                    return Err(ck_error_to_backend(e));
+                }
+            }
+        }
     }
     Ok(sess)
 }
