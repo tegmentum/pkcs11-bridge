@@ -266,4 +266,31 @@ interface key-backend {
       peer-public-key: list<u8>,
     ) -> result<list<u8>, backend-error>;
   }
+
+  // -------------------------------------------------------------------
+  // Key wrapping (key transport)
+  // -------------------------------------------------------------------
+  //
+  // Wrap the key at `target-uri` for transport, encrypting it under the
+  // wrapping key at `wrapping-uri`, and return the wrapped blob.
+  //
+  // The target must be extractable (CKA_EXTRACTABLE); the wrapping key
+  // must permit wrapping (its public half carries CKA_WRAP). Both URIs
+  // resolve on the same token/slot. Like `key.new`, `init=true` on a URI
+  // provisions the named key if absent:
+  //   - target  `...;object=data-key;init=true;algorithm=aes-256`
+  //   - wrapping `...;object=kek;init=true;algorithm=rsa-2048-wrap`
+  //
+  // `mech` selects the wrapping mechanism — `rsa-pkcs1` (CKM_RSA_PKCS) is
+  // the broadly-supported default for an RSA key-encryption key.
+  //
+  // Errors:
+  //   key-not-found            a URI didn't resolve (and wasn't init=true)
+  //   mechanism-not-supported  the token can't wrap with `mech`
+  //   internal                 CKR_KEY_NOT_WRAPPABLE / unextractable target
+  wrap-key: func(
+    target-uri: string,
+    wrapping-uri: string,
+    mech: cipher-mechanism,
+  ) -> result<list<u8>, backend-error>;
 }

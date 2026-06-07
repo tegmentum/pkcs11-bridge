@@ -156,9 +156,11 @@ mod ck {
     // Object classes (CKO_*)
     pub const CKO_PUBLIC_KEY:  u32 = 0x02;
     pub const CKO_PRIVATE_KEY: u32 = 0x03;
+    pub const CKO_SECRET_KEY:  u32 = 0x04;
     // Key types (CKK_*)
     pub const CKK_RSA:  u32 = 0x00;
     pub const CKK_EC:   u32 = 0x03;
+    pub const CKK_AES:  u32 = 0x1f;
     // Attributes (CKA_*)
     pub const CKA_CLASS:           u32 = 0x00;
     pub const CKA_TOKEN:           u32 = 0x01;  // persistent (not session) object
@@ -166,11 +168,17 @@ mod ck {
     pub const CKA_LABEL:           u32 = 0x03;
     pub const CKA_KEY_TYPE:        u32 = 0x100;
     pub const CKA_ID:              u32 = 0x102;
+    pub const CKA_ENCRYPT:         u32 = 0x104;  // allow encrypt (wrapping pub key)
+    pub const CKA_DECRYPT:         u32 = 0x105;  // allow decrypt (unwrapping priv key)
+    pub const CKA_WRAP:            u32 = 0x106;  // allow this key to wrap others
+    pub const CKA_UNWRAP:          u32 = 0x107;  // allow this key to unwrap others
     pub const CKA_SIGN:            u32 = 0x108;  // allow CKO_PRIVATE_KEY to sign
     pub const CKA_VERIFY:          u32 = 0x10A;  // allow CKO_PUBLIC_KEY to verify
     pub const CKA_MODULUS:         u32 = 0x120;
     pub const CKA_MODULUS_BITS:    u32 = 0x121;
     pub const CKA_PUBLIC_EXPONENT: u32 = 0x122;
+    pub const CKA_VALUE_LEN:       u32 = 0x161;  // symmetric key length in bytes
+    pub const CKA_EXTRACTABLE:     u32 = 0x162;  // key may be wrapped off the token
     pub const CKA_EC_PARAMS:       u32 = 0x180;
     pub const CKA_EC_POINT:        u32 = 0x181;
     // Mechanisms (CKM_*) -- the ones we map. u64 because that's the
@@ -185,6 +193,7 @@ mod ck {
     pub const CKM_SHA256_RSA_PKCS_PSS:   u64 = 0x0043;
     pub const CKM_SHA384_RSA_PKCS_PSS:   u64 = 0x0044;
     pub const CKM_SHA512_RSA_PKCS_PSS:   u64 = 0x0045;
+    pub const CKM_AES_KEY_GEN:           u64 = 0x1080;
     pub const CKM_ECDSA_KEY_PAIR_GEN:    u64 = 0x1040;
     pub const CKM_ECDSA:                 u64 = 0x1041;
     pub const CKM_ECDSA_SHA256:          u64 = 0x1044;
@@ -461,12 +470,16 @@ fn generate_keypair_for(sess: &p11_session::Session, uri: &Pkcs11Uri)
             ];
             (mech, pub_t, priv_t)
         }
-        "rsa-2048" => {
+        // `rsa-2048-wrap` is an RSA key-encryption key: the public half also
+        // carries CKA_WRAP/CKA_ENCRYPT and the private half CKA_UNWRAP/
+        // CKA_DECRYPT, so it can wrap (and later unwrap) other keys.
+        "rsa-2048" | "rsa-2048-wrap" => {
+            let wrapping = algo == "rsa-2048-wrap";
             let mech = p11_core::Mechanism {
                 kind: ck::CKM_RSA_PKCS_KEY_PAIR_GEN,
                 parameter: None,
             };
-            let pub_t = vec![
+            let mut pub_t = vec![
                 p11_core::Attribute { tag: ck::CKA_TOKEN,
                     value: p11_core::AttributeValue::Boolean(true) },
                 p11_core::Attribute { tag: ck::CKA_VERIFY,
@@ -480,7 +493,7 @@ fn generate_keypair_for(sess: &p11_session::Session, uri: &Pkcs11Uri)
                 p11_core::Attribute { tag: ck::CKA_PUBLIC_EXPONENT,
                     value: p11_core::AttributeValue::ByteString(vec![0x01, 0x00, 0x01]) },
             ];
-            let priv_t = vec![
+            let mut priv_t = vec![
                 p11_core::Attribute { tag: ck::CKA_TOKEN,
                     value: p11_core::AttributeValue::Boolean(true) },
                 p11_core::Attribute { tag: ck::CKA_PRIVATE,
@@ -492,14 +505,59 @@ fn generate_keypair_for(sess: &p11_session::Session, uri: &Pkcs11Uri)
                 p11_core::Attribute { tag: ck::CKA_ID,
                     value: p11_core::AttributeValue::ByteString(id_bytes) },
             ];
+            if wrapping {
+                pub_t.push(p11_core::Attribute { tag: ck::CKA_WRAP,
+                    value: p11_core::AttributeValue::Boolean(true) });
+                pub_t.push(p11_core::Attribute { tag: ck::CKA_ENCRYPT,
+                    value: p11_core::AttributeValue::Boolean(true) });
+                priv_t.push(p11_core::Attribute { tag: ck::CKA_UNWRAP,
+                    value: p11_core::AttributeValue::Boolean(true) });
+                priv_t.push(p11_core::Attribute { tag: ck::CKA_DECRYPT,
+                    value: p11_core::AttributeValue::Boolean(true) });
+            }
             (mech, pub_t, priv_t)
         }
-        other => return Err(kb::BackendError::MechanismNotSupported(
-            format!("init=true algorithm={other} -- only ecdsa-p256 / rsa-2048 supported"))),
+        other => return Err(kb::BackendError::MechanismNotSupported(format!(
+            "init=true algorithm={other} -- supported: ecdsa-p256/384/521, rsa-2048, rsa-2048-wrap"
+        ))),
     };
 
     sess.generate_key_pair(&mech, &pub_template, &priv_template)
         .map_err(ck_error_to_backend)?;
+    Ok(())
+}
+
+/// Generate an extractable AES-256 secret key under the URI's label on the
+/// given session. Used by the wrap path to provision an `init=true` target
+/// (`algorithm=aes-256`) — a data key that can be wrapped off the token.
+fn generate_secret_key_for(sess: &p11_session::Session, uri: &Pkcs11Uri)
+    -> Result<(), kb::BackendError> {
+    let label = uri.object.clone().unwrap_or_else(|| "pkcs11-bridge-secret".into());
+    let id_bytes = uri.id.clone().unwrap_or_else(|| label.as_bytes().to_vec());
+    let mech = p11_core::Mechanism { kind: ck::CKM_AES_KEY_GEN, parameter: None };
+    let template = vec![
+        p11_core::Attribute { tag: ck::CKA_TOKEN,
+            value: p11_core::AttributeValue::Boolean(true) },
+        p11_core::Attribute { tag: ck::CKA_PRIVATE,
+            value: p11_core::AttributeValue::Boolean(true) },
+        p11_core::Attribute { tag: ck::CKA_CLASS,
+            value: p11_core::AttributeValue::ObjectKind(ck::CKO_SECRET_KEY) },
+        p11_core::Attribute { tag: ck::CKA_KEY_TYPE,
+            value: p11_core::AttributeValue::KeyKind(ck::CKK_AES) },
+        p11_core::Attribute { tag: ck::CKA_VALUE_LEN,
+            value: p11_core::AttributeValue::Uint32(32) },
+        p11_core::Attribute { tag: ck::CKA_LABEL,
+            value: p11_core::AttributeValue::ByteString(label.as_bytes().to_vec()) },
+        p11_core::Attribute { tag: ck::CKA_ID,
+            value: p11_core::AttributeValue::ByteString(id_bytes) },
+        p11_core::Attribute { tag: ck::CKA_EXTRACTABLE,
+            value: p11_core::AttributeValue::Boolean(true) },
+        p11_core::Attribute { tag: ck::CKA_ENCRYPT,
+            value: p11_core::AttributeValue::Boolean(true) },
+        p11_core::Attribute { tag: ck::CKA_DECRYPT,
+            value: p11_core::AttributeValue::Boolean(true) },
+    ];
+    sess.generate_key(&mech, &template).map_err(ck_error_to_backend)?;
     Ok(())
 }
 
@@ -538,6 +596,52 @@ fn find_object(sess: &p11_session::Session, uri: &Pkcs11Uri, class: u32)
 struct Bridge;
 impl kb::Guest for Bridge {
     type Key = Key;
+
+    /// Wrap the key at `target_uri` under the wrapping key at `wrapping_uri`,
+    /// returning the wrapped blob. Both resolve on one session (same slot);
+    /// `init=true` on either URI provisions the named key if absent
+    /// (`algorithm=aes-256` for the target, `algorithm=rsa-2048-wrap` for the
+    /// wrapping key). See the WIT `wrap-key` docs.
+    fn wrap_key(
+        target_uri: String,
+        wrapping_uri: String,
+        mech: kb::CipherMechanism,
+    ) -> Result<Vec<u8>, kb::BackendError> {
+        let target = Pkcs11Uri::parse(&target_uri)
+            .map_err(|e| kb::BackendError::KeyNotFound(format!("bad target URI: {e}")))?;
+        let wrapping = Pkcs11Uri::parse(&wrapping_uri)
+            .map_err(|e| kb::BackendError::KeyNotFound(format!("bad wrapping URI: {e}")))?;
+
+        // One session on the target's slot: logs in and (if needed) inits the
+        // token. Both keys live on this slot.
+        let sess = open_session_for(&target)?;
+
+        // The extractable target secret key (provision on init=true).
+        let target_obj = match find_object(&sess, &target, ck::CKO_SECRET_KEY) {
+            Ok(o) => o,
+            Err(_) if target.init => {
+                generate_secret_key_for(&sess, &target)?;
+                find_object(&sess, &target, ck::CKO_SECRET_KEY)?
+            }
+            Err(e) => return Err(e),
+        };
+
+        // The wrapping key's public half, which carries CKA_WRAP (provision the
+        // keypair on init=true).
+        let wrap_pub = match find_object(&sess, &wrapping, ck::CKO_PUBLIC_KEY) {
+            Ok(o) => o,
+            Err(_) if wrapping.init => {
+                generate_keypair_for(&sess, &wrapping)?;
+                find_object(&sess, &wrapping, ck::CKO_PUBLIC_KEY)?
+            }
+            Err(e) => return Err(e),
+        };
+
+        let ckm = map_cipher_mech(&mech)?;
+        let mechanism = p11_core::Mechanism { kind: ckm, parameter: None };
+        sess.wrap_key(&mechanism, &wrap_pub, &target_obj)
+            .map_err(ck_error_to_backend)
+    }
 }
 
 /// One Key resource = one PKCS#11 session + one resolved private key
