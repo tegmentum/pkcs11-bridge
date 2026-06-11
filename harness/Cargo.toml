@@ -8,6 +8,6 @@ description = "Native wasmtime harness: drives tegmentum:key-backend through pkc
 
 [dependencies]
 anyhow      = "1"
-wasmtime    = { version = "38.0.3", features = ["component-model"] }
-wasmtime-wasi = "38.0.3"
+wasmtime    = { version = "45.0.1", features = ["component-model"] }
+wasmtime-wasi = "45.0.1"
 openssl     = "0.10"
