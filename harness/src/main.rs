@@ -31,7 +31,7 @@ wasmtime::component::bindgen!({
     path: "wit",
     world: "harness",
     with: {
-        "pkcs11:util/util/pin-provider": HostPin,
+        "pkcs11:util/util.pin-provider": HostPin,
     },
 });
 
@@ -88,7 +88,7 @@ fn main() -> Result<()> {
     engine_cfg.wasm_component_model(true);
     let engine = Engine::new(&engine_cfg)?;
     let component = Component::from_file(&engine, &component_path)
-        .with_context(|| format!("loading composed component {}", component_path.display()))?;
+        .map_err(|e| anyhow!("loading composed component {}: {e}", component_path.display()))?;
 
     let guest_stderr = MemoryOutputPipe::new(4 << 20);
     let mut wasi = WasiCtxBuilder::new();
