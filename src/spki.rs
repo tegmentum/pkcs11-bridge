@@ -15,6 +15,10 @@ const OID_ID_EC_PUBLIC_KEY: &[u8] = &[
 const OID_RSA_ENCRYPTION: &[u8] = &[
     0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01,
 ];
+/// id-Ed25519 -- 1.3.101.112 (RFC 8410)
+const OID_ID_ED25519: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x70];
+/// id-Ed448 -- 1.3.101.113 (RFC 8410)
+const OID_ID_ED448: &[u8] = &[0x06, 0x03, 0x2b, 0x65, 0x71];
 /// NULL
 const DER_NULL: &[u8] = &[0x05, 0x00];
 
@@ -148,6 +152,29 @@ pub fn ecdsa_raw_to_der(raw: &[u8]) -> Result<Vec<u8>, &'static str> {
 ///       SEQUENCE { INTEGER modulus, INTEGER exponent }
 ///     }
 ///   }
+/// Build an EdDSA (Ed25519/Ed448) SubjectPublicKeyInfo per RFC 8410:
+///
+///   SubjectPublicKeyInfo ::= SEQUENCE {
+///       algorithm         AlgorithmIdentifier,   -- id-Ed25519 or id-Ed448, no params
+///       subjectPublicKey  BIT STRING             -- raw 32-byte (Ed25519) or 57-byte (Ed448) key
+///   }
+///
+/// `raw_key` is the raw public-key bytes as PKCS#11 exposes them on
+/// CKA_EC_POINT (32 bytes for Ed25519, 57 for Ed448 — no OCTET STRING
+/// wrapping; the caller has already peeled that if present).
+pub fn build_edwards_spki(oid: &[u8], raw_key: &[u8]) -> Vec<u8> {
+    let alg = der_seq(oid);
+    let bits = der_bit_string(raw_key);
+    let mut spki = Vec::with_capacity(alg.len() + bits.len());
+    spki.extend_from_slice(&alg);
+    spki.extend_from_slice(&bits);
+    der_seq(&spki)
+}
+
+/// Convenience constants exposed for callers.
+pub const OID_ED25519: &[u8] = OID_ID_ED25519;
+pub const OID_ED448: &[u8] = OID_ID_ED448;
+
 pub fn build_rsa_spki(modulus: &[u8], public_exponent: &[u8]) -> Vec<u8> {
     // RSAPublicKey
     let m = der_integer(modulus);

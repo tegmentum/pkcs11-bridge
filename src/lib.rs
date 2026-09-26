@@ -71,6 +71,12 @@ struct Pkcs11Uri {
     /// Extension: which algorithm to generate on init. Defaults to
     /// "ecdsa-p256".
     algorithm: Option<String>,
+    /// Extension: fall back to `get_slot_list(true).first()` when the
+    /// requested slot-id has no token present (non-destructive — no
+    /// `init_token` call). Useful when the module (e.g. SoftHSM2)
+    /// assigns unpredictable slot IDs derived from the token serial,
+    /// but the caller knows there's exactly one initialized token.
+    slot_any: bool,
 }
 
 impl Pkcs11Uri {
@@ -98,6 +104,8 @@ impl Pkcs11Uri {
                                                    "true" | "1" | "yes" | "auto"),
                 "so-pin"    => out.so_pin = Some(v),
                 "algorithm" => out.algorithm = Some(v),
+                "slot-any"  => out.slot_any = matches!(v.as_str(),
+                                                       "true" | "1" | "yes"),
                 // Tolerated but ignored in Phase 4.
                 "token" | "manufacturer" | "model" | "library-version"
                   | "library-manufacturer" | "library-description"
@@ -158,9 +166,10 @@ mod ck {
     pub const CKO_PRIVATE_KEY: u32 = 0x03;
     pub const CKO_SECRET_KEY:  u32 = 0x04;
     // Key types (CKK_*)
-    pub const CKK_RSA:  u32 = 0x00;
-    pub const CKK_EC:   u32 = 0x03;
-    pub const CKK_AES:  u32 = 0x1f;
+    pub const CKK_RSA:         u32 = 0x00;
+    pub const CKK_EC:          u32 = 0x03;
+    pub const CKK_AES:         u32 = 0x1f;
+    pub const CKK_EC_EDWARDS:  u32 = 0x40;  // Ed25519 / Ed448 via SoftHSM
     // Attributes (CKA_*)
     pub const CKA_CLASS:           u32 = 0x00;
     pub const CKA_TOKEN:           u32 = 0x01;  // persistent (not session) object
@@ -365,7 +374,21 @@ fn open_session_for(uri: &Pkcs11Uri) -> Result<p11_session::Session, kb::Backend
     // CKR_TOKEN_NOT_PRESENT 0xE1) and the URI asked for init=true,
     // provision a token and rediscover the slot id; otherwise
     // propagate the error.
-    let sess = match p11_slot::open_session(target_slot, flags) {
+    // slot-any: enumerate present slots BEFORE open_session, since
+    // SoftHSM's out-of-range slot access aborts (uncaught C++
+    // exception in the WASI build) rather than returning
+    // CKR_SLOT_ID_INVALID. Non-destructive — no init_token call.
+    let effective_slot = if uri.slot_any {
+        *p11_slot::get_slot_list(true)
+            .map_err(ck_error_to_backend)?
+            .first()
+            .ok_or_else(|| kb::BackendError::Internal(
+                "slot-any: no present slots".into()))?
+    } else {
+        target_slot
+    };
+
+    let sess = match p11_slot::open_session(effective_slot, flags) {
         Ok(s) => s,
         Err(_) if uri.init => {
             // Initialize a token on whatever slot is offered first.
@@ -703,6 +726,15 @@ impl kb::GuestKey for Key {
             .find_map(|a| match a.value {
                 p11_core::AttributeValue::KeyKind(k)   => Some(k),
                 p11_core::AttributeValue::Uint32(k)    => Some(k),
+                // Some modules return CKA_KEY_TYPE as raw bytes
+                // (native u32 in module-endian). Interpret the first
+                // 1-4 bytes as a little-endian u32.
+                p11_core::AttributeValue::ByteString(b) if !b.is_empty() => {
+                    let mut buf = [0u8; 4];
+                    let n = b.len().min(4);
+                    buf[..n].copy_from_slice(&b[..n]);
+                    Some(u32::from_le_bytes(buf))
+                }
                 _                                       => None,
             });
         let key_type = from_attr.unwrap_or_else(|| match self.uri.algorithm.as_deref() {
@@ -710,6 +742,48 @@ impl kb::GuestKey for Key {
             Some(s) if s.starts_with("rsa-")   => ck::CKK_RSA,
             _ => u32::MAX,
         });
+        // Peek CKA_EC_PARAMS from BOTH the private and public objects
+        // first: some modules (e.g. SoftHSM) store ed25519/ed448 under
+        // CKK_EC with the Edwards OID in CKA_EC_PARAMS instead of
+        // CKK_EC_EDWARDS, and CKA_EC_PARAMS may live on either object.
+        // If we see the Ed25519 / Ed448 OID here, short-circuit to
+        // the corresponding EdDSA algorithm.
+        let ec_params_early: Option<Vec<u8>> = self
+            .private_obj
+            .get_attributes(&[ck::CKA_EC_PARAMS])
+            .ok()
+            .and_then(|a| a.into_iter().find_map(|a| match a.value {
+                p11_core::AttributeValue::ByteString(b) => Some(b),
+                _ => None,
+            }))
+            .or_else(|| {
+                find_object(&self.session, &self.uri, ck::CKO_PUBLIC_KEY)
+                    .ok()
+                    .and_then(|obj| obj.get_attributes(&[ck::CKA_EC_PARAMS]).ok())
+                    .and_then(|a| a.into_iter().find_map(|a| match a.value {
+                        p11_core::AttributeValue::ByteString(b) => Some(b),
+                        _ => None,
+                    }))
+            });
+        // Relaxed check: search for the Ed25519 (2B 65 70) or Ed448
+        // (2B 65 71) OID content anywhere in the CKA_EC_PARAMS bytes.
+        // Different tokens wrap the OID differently (bare, OCTET
+        // STRING wrap, etc.); this pattern-match is fast and covers
+        // every wrapping we've seen in the wild.
+        if let Some(bytes) = ec_params_early.as_deref() {
+            let has_ed25519 = bytes.windows(3).any(|w| w == [0x2B, 0x65, 0x70]);
+            let has_ed448 = bytes.windows(3).any(|w| w == [0x2B, 0x65, 0x71]);
+            if has_ed25519 {
+                let algo = kb::KeyAlgorithm::Ed25519;
+                *self.algorithm.borrow_mut() = Some(algo.clone());
+                return algo;
+            }
+            if has_ed448 {
+                let algo = kb::KeyAlgorithm::Ed448;
+                *self.algorithm.borrow_mut() = Some(algo.clone());
+                return algo;
+            }
+        }
         let algo = match key_type {
             ck::CKK_EC => {
                 // Resolve the curve by parsing CKA_EC_PARAMS (OID for
@@ -761,6 +835,25 @@ impl kb::GuestKey for Key {
                     .unwrap_or(2048);
                 kb::KeyAlgorithm::Rsa(kb::RsaInfo { modulus_bits: bits })
             }
+            ck::CKK_EC_EDWARDS => {
+                // Distinguish Ed25519 vs Ed448 via CKA_EC_PARAMS OID.
+                // Ed25519: 1.3.101.112 (DER: 06 03 2B 65 70)
+                // Ed448:   1.3.101.113 (DER: 06 03 2B 65 71)
+                // If CKA_EC_PARAMS is unreadable, default to Ed25519
+                // (the by-far common case; softhsm-wasm's
+                // keystore-pkcs11 provisions Ed25519).
+                let ec_params: Option<Vec<u8>> = self.private_obj
+                    .get_attributes(&[ck::CKA_EC_PARAMS])
+                    .ok()
+                    .and_then(|a| a.into_iter().find_map(|a| match a.value {
+                        p11_core::AttributeValue::ByteString(b) => Some(b),
+                        _ => None,
+                    }));
+                match ec_params.as_deref() {
+                    Some([0x06, 0x03, 0x2B, 0x65, 0x71]) => kb::KeyAlgorithm::Ed448,
+                    _ => kb::KeyAlgorithm::Ed25519,
+                }
+            }
             _ => kb::KeyAlgorithm::Ec(kb::EcInfo { curve: "prime256v1".into() }),
         };
         *self.algorithm.borrow_mut() = Some(algo.clone());
@@ -792,6 +885,33 @@ impl kb::GuestKey for Key {
                 let pt = point.ok_or_else(|| kb::BackendError::Internal(
                     "EC public key missing CKA_EC_POINT".into()))?;
                 build_ec_spki(&p, &pt)?
+            }
+            kb::KeyAlgorithm::Ed25519 | kb::KeyAlgorithm::Ed448 => {
+                // Raw public key is on CKA_EC_POINT for the public
+                // object; SoftHSM stores it as the raw 32/57-byte key
+                // (per PKCS#11 3.0 §2.3.5), no OCTET STRING wrapper —
+                // unlike NIST-curve EC where it's DER-encoded.
+                let attrs = pub_obj.get_attributes(&[ck::CKA_EC_POINT])
+                    .map_err(ck_error_to_backend)?;
+                let raw = attrs.into_iter()
+                    .find_map(|a| match a.value {
+                        p11_core::AttributeValue::ByteString(b) => Some(b),
+                        _ => None,
+                    })
+                    .ok_or_else(|| kb::BackendError::Internal(
+                        "EdDSA public key missing CKA_EC_POINT".into()))?;
+                // Some tokens wrap the raw key in an OCTET STRING
+                // (DER: 04 <len> <32 or 57 bytes>). Peel that off if
+                // present.
+                let raw = match raw.as_slice() {
+                    [0x04, len, rest @ ..] if *len as usize == rest.len() => rest.to_vec(),
+                    _ => raw,
+                };
+                let oid = match algo {
+                    kb::KeyAlgorithm::Ed25519 => spki::OID_ED25519,
+                    _                         => spki::OID_ED448,
+                };
+                spki::build_edwards_spki(oid, &raw)
             }
             kb::KeyAlgorithm::Rsa(_) => {
                 let attrs = pub_obj.get_attributes(&[ck::CKA_MODULUS, ck::CKA_PUBLIC_EXPONENT])
