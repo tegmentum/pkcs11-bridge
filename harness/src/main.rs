@@ -74,10 +74,17 @@ fn main() -> Result<()> {
 
     // Set up the WASI directory layout softhsm2 expects: /config/
     // (read-only conf) and /data/tokens/ (read-write token storage).
-    let run = std::env::temp_dir()
-        .join(format!("pkcs11-bridge-harness-{}", std::process::id()));
-    let cfg_dir  = run.join("config");
-    let data_dir = run.join("data");
+    // TOKENS_DIR env var lets the caller point at a persistent tokens
+    // dir shared with a bootstrap process (e.g. softhsm-wasm's
+    // keystore-pkcs11 harness). Default is a per-PID temp dir.
+    let (cfg_dir, data_dir) = if let Ok(dir) = std::env::var("TOKENS_DIR") {
+        let base = PathBuf::from(dir);
+        (base.join("config"), base.join("data"))
+    } else {
+        let run = std::env::temp_dir()
+            .join(format!("pkcs11-bridge-harness-{}", std::process::id()));
+        (run.join("config"), run.join("data"))
+    };
     std::fs::create_dir_all(&cfg_dir)?;
     std::fs::create_dir_all(data_dir.join("tokens"))?;
     let conf = std::fs::read(&conf_path)
@@ -127,19 +134,47 @@ fn main() -> Result<()> {
             .map_err(|e: kb::BackendError| anyhow!("public_key_info: {e:?}"))?;
         println!("    SPKI = {} bytes", spki.len());
 
-        println!("[4] key.sign(message, ECDSA-SHA256 or RSA-PKCS1-SHA256)");
+        println!("[4] key.sign(message, algorithm-appropriate mechanism)");
         let message = b"phase-4 pkcs11-bridge end-to-end smoke".to_vec();
         let mech = match &algo {
             kb::KeyAlgorithm::Ec(_)  => kb::SignatureMechanism::Ecdsa(kb::DigestAlgorithm::Sha256),
             kb::KeyAlgorithm::Rsa(_) => kb::SignatureMechanism::RsaPkcs1(kb::DigestAlgorithm::Sha256),
-            other => bail!("unexpected algorithm: {other:?}"),
+            kb::KeyAlgorithm::Ed25519 | kb::KeyAlgorithm::Ed448 => kb::SignatureMechanism::Eddsa,
+            other => bail!("unsupported algorithm: {other:?}"),
         };
         let signature = backend.key().call_sign(&mut store, key, &message, mech)
             .map_err(|t| anyhow!("trap: {t}"))?
             .map_err(|e: kb::BackendError| anyhow!("sign: {e:?}"))?;
         println!("    signature = {} bytes", signature.len());
 
-        println!("[5] verify with openssl-rs against the returned SPKI");
+        println!("[5] verify against the returned SPKI");
+        if matches!(algo, kb::KeyAlgorithm::Ed25519) {
+            // Ed25519: peel the raw 32-byte pubkey off the RFC 8410
+            // SPKI tail and verify with ed25519-dalek — openssl-rs
+            // pre-3.2 doesn't ship the Ed25519 verifier.
+            if spki.len() < 32 {
+                bail!("SPKI too short for ed25519: {} bytes", spki.len());
+            }
+            let raw: [u8; 32] = spki[spki.len() - 32..]
+                .try_into()
+                .context("SPKI tail to 32-byte ed25519 key")?;
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(&raw)
+                .context("ed25519 verifying-key from raw")?;
+            let sig_bytes: [u8; 64] = signature.as_slice()
+                .try_into()
+                .context("64-byte ed25519 signature")?;
+            let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+            use ed25519_dalek::Verifier;
+            vk.verify(&message, &sig).context("ed25519 verify")?;
+            println!("\nOK -- pkcs11-bridge signed via SoftHSM in-sandbox; signature verifies natively.");
+            let logs = guest_stderr.contents();
+            if !logs.is_empty() {
+                eprintln!("\n--- guest stderr ---");
+                eprint!("{}", String::from_utf8_lossy(&logs));
+                eprintln!("--- end guest stderr ---");
+            }
+            return Ok(());
+        }
         let pubkey = openssl::pkey::PKey::public_key_from_der(&spki)
             .context("SPKI parse")?;
         let mut verifier = openssl::sign::Verifier::new(
